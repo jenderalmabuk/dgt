@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from typing import Optional
 
 from utils.logger import logger
@@ -24,6 +25,24 @@ TRADES_CHAT_ID = int(os.getenv("SIGNAL_COPY_TRADES_NOTIFY_CHAT_ID", "0"))
 
 _parser_bot: Optional[Bot] = None
 _trades_bot: Optional[Bot] = None
+
+
+def _plain_text(message: str) -> str:
+    """Strip only Telegram HTML tags; preserve malformed provider text literally."""
+    return re.sub(r"</?(?:a|b|blockquote|code|em|i|pre|s|span|strong|tg-spoiler|u)(?:\s+[^>]*)?>", "", message, flags=re.I)
+
+
+async def _send_html_then_plain(bot, chat_id: int, message: str) -> bool:
+    """Keep expandable HTML when valid; retry malformed provider content as plain text."""
+    try:
+        await bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML",
+                               disable_web_page_preview=True)
+        return True
+    except Exception as exc:
+        logger.warning("⚠️ Telegram HTML send failed, fallback to plain text: %s", exc)
+        await bot.send_message(chat_id=chat_id, text=_plain_text(message), parse_mode=None,
+                               disable_web_page_preview=True)
+        return True
 
 
 async def _send_with_retry(send_call, attempts: int = 3) -> bool:
@@ -71,19 +90,21 @@ async def send_parser_notification(message: str, chart_path: Optional[str] = Non
             try:
                 from telegram import InputFile
                 with open(chart_path, "rb") as fh:
+                    long_report = len(message) > 1024
                     await _parser_bot.send_photo(
                         chat_id=PARSER_CHAT_ID,
                         photo=InputFile(fh, filename=chart_path.rsplit("/", 1)[-1]),
-                        caption=message[:1024],
+                        caption="📊 Chart validasi" if long_report else message,
                         parse_mode="HTML",
                     )
+                    if long_report:
+                        return await _send_html_then_plain(_parser_bot, PARSER_CHAT_ID, message)
                     return True
             except Exception as exc:
                 logger.warning(f"⚠️ Parser chart send failed, fallback to text: {exc}")
         async def _send_text():
-            await _parser_bot.send_message(
-                chat_id=PARSER_CHAT_ID, text=message, parse_mode="HTML",
-                disable_web_page_preview=True)
+            if not await _send_html_then_plain(_parser_bot, PARSER_CHAT_ID, message):
+                raise RuntimeError("Telegram parser notification failed")
         return await _send_with_retry(_send_text)
     except Exception as exc:
         logger.error(f"❌ Parser bot send failed: {exc}")

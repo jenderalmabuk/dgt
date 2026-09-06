@@ -23,13 +23,29 @@ BASE = os.getenv("BINANCE_FAPI_BASE", "https://fapi.binance.com")
 KLINE_TFS = ["1m", "3m", "5m", "15m", "30m", "1h", "4h"]
 TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
           "1h": 3600, "4h": 14400, "1d": 86400}
-KLINE_LIMIT = int(os.getenv("KLINE_LIMIT", "500"))
+KLINE_LIMIT = int(os.getenv("KLINE_LIMIT", "3"))
 LOOP_SEC = int(os.getenv("COLLECTOR_LOOP_SEC", "60"))
 OI_LOOP_SEC = int(os.getenv("OI_LOOP_SEC", "300"))
 FUNDING_LOOP_SEC = int(os.getenv("FUNDING_LOOP_SEC", "900"))
 CONCURRENCY = int(os.getenv("COLLECTOR_CONCURRENCY", "4"))
 UNSUPPORTED_RETRY_SEC = int(os.getenv("UNSUPPORTED_RETRY_SEC", "21600"))
+RATE_LIMIT_BACKOFF_SEC = int(os.getenv("RATE_LIMIT_BACKOFF_SEC", "300"))
 _unsupported_until: dict[str, float] = {}
+_rate_limited_until = 0.0
+
+
+def _trip_rate_limit() -> None:
+    global _rate_limited_until
+    _rate_limited_until = max(_rate_limited_until, time.time() + RATE_LIMIT_BACKOFF_SEC)
+
+
+def _rate_limited() -> bool:
+    return time.time() < _rate_limited_until
+
+
+def _due_tfs(now: float, last_run: dict[str, float]) -> list[str]:
+    """Fetch a timeframe only when another closed candle can exist."""
+    return [tf for tf in KLINE_TFS if now - last_run.get(tf, 0.0) >= TF_SEC[tf]]
 
 
 def _quarantine(symbol: str) -> None:
@@ -66,12 +82,15 @@ def _kline_rows(symbol: str, tf: str, data: list[list]) -> list[tuple]:
 
 async def _collect_klines(client: httpx.AsyncClient, sem: asyncio.Semaphore,
                           symbol: str, tf: str) -> None:
-    if _is_quarantined(symbol):
+    if _rate_limited() or _is_quarantined(symbol):
         return
     async with sem:
         try:
             r = await client.get(f"{BASE}/fapi/v1/klines",
                                  params={"symbol": symbol, "interval": tf, "limit": KLINE_LIMIT})
+            if r.status_code in {418, 429}:
+                _trip_rate_limit()
+                return
             if r.status_code == 400 and r.json().get("code") == -1121:
                 first = not _is_quarantined(symbol)
                 _quarantine(symbol)
@@ -85,12 +104,15 @@ async def _collect_klines(client: httpx.AsyncClient, sem: asyncio.Semaphore,
 
 
 async def _collect_oi(client: httpx.AsyncClient, sem: asyncio.Semaphore, symbol: str) -> None:
-    if _is_quarantined(symbol):
+    if _rate_limited() or _is_quarantined(symbol):
         return
     async with sem:
         try:
             r = await client.get(f"{BASE}/futures/data/openInterestHist",
                                  params={"symbol": symbol, "period": "5m", "limit": 30})
+            if r.status_code in {418, 429}:
+                _trip_rate_limit()
+                return
             r.raise_for_status()
             data = r.json()
             prev = await last_oi("binance", symbol, "5m")
@@ -107,12 +129,15 @@ async def _collect_oi(client: httpx.AsyncClient, sem: asyncio.Semaphore, symbol:
 
 
 async def _collect_funding(client: httpx.AsyncClient, sem: asyncio.Semaphore, symbol: str) -> None:
-    if _is_quarantined(symbol):
+    if _rate_limited() or _is_quarantined(symbol):
         return
     async with sem:
         try:
             r = await client.get(f"{BASE}/fapi/v1/fundingRate",
                                  params={"symbol": symbol, "limit": 30})
+            if r.status_code in {418, 429}:
+                _trip_rate_limit()
+                return
             r.raise_for_status()
             data = r.json()
             rates = [float(d["fundingRate"]) for d in data]
@@ -138,13 +163,17 @@ async def run() -> None:
     sem = asyncio.Semaphore(CONCURRENCY)
     last_oi_run = 0.0
     last_funding_run = 0.0
+    last_tf_run: dict[str, float] = {}
     async with httpx.AsyncClient(timeout=30) as client:
         while True:  # continuous loop — collectors are long-lived services
             t0 = time.time()
+            due_tfs = _due_tfs(t0, last_tf_run)
             await asyncio.gather(*[
                 _collect_klines(client, sem, sym, tf)
-                for sym in symbols for tf in KLINE_TFS
+                for sym in symbols for tf in due_tfs
             ])
+            for tf in due_tfs:
+                last_tf_run[tf] = t0
             if time.time() - last_oi_run >= OI_LOOP_SEC:
                 await asyncio.gather(*[_collect_oi(client, sem, sym) for sym in symbols])
                 last_oi_run = time.time()

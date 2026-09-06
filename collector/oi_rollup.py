@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from datetime import timedelta
 
 from collector.db import pool
 
@@ -30,14 +31,15 @@ ON CONFLICT (exchange, symbol, timeframe, timestamp) DO UPDATE SET
 """
 
 LOOP_SEC = int(os.getenv("OI_ROLLUP_LOOP_SEC", "3600"))
+ROLLUPS = (("5m", "1h", timedelta(hours=1)), ("5m", "4h", timedelta(hours=4)),
+           ("15m", "1h", timedelta(hours=1)), ("15m", "4h", timedelta(hours=4)))
 
 
 async def rollup_once() -> None:
     p = await pool()
     async with p.acquire() as conn:
         # 5m (binance base) and 15m (bybit base) -> 1h and 4h
-        for src, dst, interval in (("5m", "1h", "1 hour"), ("5m", "4h", "4 hours"),
-                                   ("15m", "1h", "1 hour"), ("15m", "4h", "4 hours")):
+        for src, dst, interval in ROLLUPS:
             try:
                 await conn.execute(ROLLUP_SQL, src, dst, interval)
             except Exception as exc:

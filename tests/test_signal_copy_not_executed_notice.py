@@ -36,7 +36,8 @@ def test_short_past_tp1_but_not_full_target_still_submits():
         async def commit_open_trade(self, *args, **kwargs): return None
     class Trader:
         async def submit_open(self, **kwargs):
-            return {"entry_price": 2.05, "notional": kwargs["notional"]}
+            return {"ok": True, "position_confirmed": True, "entry_price": 2.05,
+                        "notional": kwargs["notional"], "qty": 1.0}
     sig = ParsedSignal("NEOUSDT", SignalSide.SHORT, 2.068, 2.130,
                        stop_loss=2.21276,
                        take_profits=[2.057, 1.995, 1.932, 1.870, 1.808])

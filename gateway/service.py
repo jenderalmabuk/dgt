@@ -28,6 +28,14 @@ from gateway.order_intent import OrderIntent
 logger = logging.getLogger("gateway")
 
 
+def trader_rejected(response) -> bool:
+    """Normalize bool/dict trader contracts into one rejection decision."""
+    return not response or (
+        isinstance(response, dict)
+        and not response.get("ok", response.get("success", True))
+    )
+
+
 @dataclass
 class GatewayResult:
     ok: bool
@@ -38,6 +46,7 @@ class GatewayResult:
     notional: float = 0.0
     risk_amount: float = 0.0
     trader_response: Optional[Dict[str, Any]] = field(default=None)
+    risk_details: Optional[Dict[str, Any]] = field(default=None)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -49,6 +58,7 @@ class GatewayResult:
             "notional": self.notional,
             "risk_amount": self.risk_amount,
             "trader_response": self.trader_response,
+            "risk_details": self.risk_details,
         }
 
 
@@ -68,6 +78,7 @@ class ExecutionGateway:
         self.submit_timeout_sec = float(submit_timeout_sec)
         self.history: List[Dict[str, Any]] = []   # last N results, for /portfolio & debugging
         self._history_max = 200
+        self.smart_virtual_book = None
 
     # ── public API ───────────────────────────────────────────
 
@@ -86,6 +97,20 @@ class ExecutionGateway:
         side = str(intent.side).upper()
         entry = float(intent.entry_price)
         sl = float(intent.sl_price)
+
+        # Independent Arm C paper book observes every valid Signal Copy intent before
+        # canonical capacity/risk gates. Failure never changes canonical decision.
+        if (intent.source == "SIGNAL_COPY" and
+                os.getenv("GATEWAY_PAPER_MAINNET", "true").lower() in ("1", "true", "yes")):
+            try:
+                if self.smart_virtual_book is None:
+                    from execution.smart_virtual_portfolio import SmartVirtualPortfolioBook
+                    self.smart_virtual_book = SmartVirtualPortfolioBook(
+                        self.trader, equity=float(self.risk_mgr.get_current_equity()))
+                    self.trader.smart_virtual_book = self.smart_virtual_book
+                await self.smart_virtual_book.capture(intent)
+            except Exception as exc:
+                logger.warning("[GATEWAY] smart virtual capture failed %s: %s", symbol, exc)
 
         # 2) Hard cap counts running positions only. Pending setup limits stay unlimited.
         max_running = self.risk_mgr.get_max_running_positions()
@@ -121,15 +146,21 @@ class ExecutionGateway:
         # Paper HARD_SL economic risk = adverse entry + adverse exit@SL + round-trip fees.
         # Size/reserve on that, not raw signal distance — LAUSDT blew 1% on fees/exit-slip.
         if os.getenv("GATEWAY_PAPER_MAINNET", "true").lower() in ("1", "true", "yes"):
-            notional, risk_amount = await self._paper_econ_size(
-                symbol, side, entry, sl, notional, intent.source,
-            )
+            try:
+                notional, risk_amount, price_quote = await self._paper_econ_size(
+                    symbol, side, entry, sl, notional, intent.source,
+                )
+            except (TypeError, ValueError) as exc:
+                res.reason = f"PRICE_VALIDATION_FAILED: {exc}"
+                return self._record(intent, res)
         res.notional = notional
         res.risk_amount = risk_amount
 
         # 4) build the trader payload (same keys signal_copy already uses,
         #    so BinanceTestnetTrader needs ZERO changes)
         payload = self._build_payload(intent, entry, sl, side, notional, risk_amount)
+        if os.getenv("GATEWAY_PAPER_MAINNET", "true").lower() in ("1", "true", "yes"):
+            payload["execution_price_quote"] = price_quote
 
         if dry_run:
             res.ok = True
@@ -139,18 +170,15 @@ class ExecutionGateway:
             return self._record(intent, res)
 
         # 5) reserve -> submit -> commit/release (identical semantics to signal_copy)
-        reserved = False
         try:
-            reserved = await self.risk_mgr.reserve_open_risk(symbol, risk_amount)
+            reserve = await self.risk_mgr.reserve_open_risk_details(symbol, risk_amount)
         except Exception as exc:
-            logger.warning("[GATEWAY] risk reserve error %s: %s", symbol, exc)
-        if not reserved:
-            if symbol.upper() in self.risk_mgr._position_symbols():
-                res.reason = f"position already open for {symbol}"
-            elif self.risk_mgr.get_total_open_risk() + risk_amount > self.risk_mgr.get_parallel_open_risk_budget():
-                res.reason = "global open-risk budget exhausted"
-            else:
-                res.reason = "open-risk reservation blocked"
+            res.reason = f"RESERVATION_ERROR: {exc}"
+            res.risk_details = {"reserved": False, "code": "RESERVATION_ERROR"}
+            return self._record(intent, res)
+        res.risk_details = reserve
+        if not reserve["reserved"]:
+            res.reason = f"open-risk reservation blocked: {reserve['code']}"
             return self._record(intent, res)
 
         try:
@@ -161,7 +189,7 @@ class ExecutionGateway:
             res.reason = f"submit_open error: {exc}"
             return self._record(intent, res)
 
-        if not opened:
+        if trader_rejected(opened):
             await self._safe_release(symbol)
             reason_detail = ""
             if isinstance(opened, dict) and opened.get("error"):
@@ -169,11 +197,15 @@ class ExecutionGateway:
             elif isinstance(opened, dict) and opened.get("reason"):
                 reason_detail = f" | {opened['reason']}"
             res.reason = f"trader rejected open: no position created{reason_detail}"
+            res.trader_response = opened if isinstance(opened, dict) else {"raw": str(opened)}
             logger.warning("[GATEWAY] %s %s: %s", symbol, side, res.reason)
             return self._record(intent, res)
 
         try:
-            await self.risk_mgr.commit_open_trade(symbol, risk_amount=risk_amount, is_vip=intent.is_vip)
+            actual_fill_risk = (opened.get("max_loss_usd_at_fill")
+                                if isinstance(opened, dict) else None)
+            committed_risk = float(actual_fill_risk) if actual_fill_risk is not None else risk_amount
+            await self.risk_mgr.commit_open_trade(symbol, risk_amount=committed_risk, is_vip=intent.is_vip)
         except Exception as exc:
             logger.warning("[GATEWAY] commit_open_trade error %s: %s", symbol, exc)
 
@@ -226,19 +258,20 @@ class ExecutionGateway:
 
     # ── internals ────────────────────────────────────────────
 
-    async def _paper_fill_entry(self, symbol: str, side: str, signal_entry: float) -> float:
-        """Actual paper open fill: mainnet mark when available, else signal, then adverse slip."""
+    async def _paper_fill_entry(self, symbol: str, side: str, signal_entry: float):
+        """Fresh quote used once for sizing and submission."""
         slip = max(0.0, float(os.getenv("PAPER_SLIPPAGE_PCT", "0.0005")))
-        mark = 0.0
-        getter = getattr(self.trader, "_get_mark_price", None)
-        if callable(getter):
-            try:
-                mark = float(await getter(symbol) or 0.0)
-            except Exception:
-                mark = 0.0
-        base = mark if mark > 0 else float(signal_entry)
+        getter = getattr(self.trader, "_get_fresh_open_quote", None)
+        if not callable(getter):
+            raise ValueError("fresh price provenance unavailable")
+        quote = await getter(symbol)
+        if not isinstance(quote, dict) or quote.get("price_fresh") is not True:
+            raise ValueError("fresh market price unavailable")
+        base = float(quote.get("price") or 0.0)
+        if base <= 0:
+            raise ValueError("fresh market price unavailable")
         buy = side == "LONG"
-        return base * (1.0 + slip if buy else 1.0 - slip)
+        return base * (1.0 + slip if buy else 1.0 - slip), quote
 
     @staticmethod
     def _paper_hard_sl_econ(side: str, slipped_entry: float, sl: float, notional: float) -> float:
@@ -259,7 +292,7 @@ class ExecutionGateway:
     async def _paper_econ_size(
         self, symbol: str, side: str, entry: float, sl: float, notional: float, source: str,
     ):
-        slipped_entry = await self._paper_fill_entry(symbol, side, entry)
+        slipped_entry, quote = await self._paper_fill_entry(symbol, side, entry)
         risk_amount = self._paper_hard_sl_econ(side, slipped_entry, sl, notional)
         if source == "SIGNAL_COPY":
             current_equity = float(self.risk_mgr.get_current_equity())
@@ -268,7 +301,7 @@ class ExecutionGateway:
                 scale = max_trade_risk / risk_amount
                 notional = float(notional) * scale
                 risk_amount = self._paper_hard_sl_econ(side, slipped_entry, sl, notional)
-        return float(notional), float(risk_amount)
+        return float(notional), float(risk_amount), quote
 
     def _size(self, intent: OrderIntent, entry: float, sl: float, side: str):
         """Return (notional, risk_amount, error)."""

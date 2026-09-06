@@ -40,6 +40,17 @@ def _canonical_supported(symbol: str) -> bool:
     return True
 
 
+def price_metadata(source: str, age_sec: float) -> Dict[str, Any]:
+    """Execution-safe price provenance."""
+    source = str(source or "unknown")
+    age = max(0.0, float(age_sec or 0.0))
+    return {
+        "price_source": source,
+        "price_age_sec": age,
+        "price_fresh": source in {"binance_rest", "bybit_api"} or age <= 1800.0,
+    }
+
+
 class NexusDataBridge:
     """
     Lightweight data adapter: reads scanner cache, computes derived metrics.
@@ -64,7 +75,9 @@ class NexusDataBridge:
                     raise FileNotFoundError(f"Scanner cache dir not found: {self.cache_dir}")
 
         # FastAPI URL for klines (reads from TimescaleDB)
-        self.api_url = api_url or os.getenv("NEXUS_API_URL", "http://fastapi:8000")
+        # Try fastapi hostname first (works in container), fallback to localhost (works on host)
+        default_api = os.getenv("NEXUS_API_URL", "http://localhost:8000")
+        self.api_url = api_url or default_api
 
         # Cache latest scan metadata in memory (TTL 60s)
         self._scan_cache: Optional[Dict] = None
@@ -84,6 +97,8 @@ class NexusDataBridge:
             return self._flow_cache
 
         candidates = [
+            Path("/app/runtime/revo/revo_flow_context_canonical.json"),
+            Path(__file__).parent.parent / "runtime" / "revo" / "revo_flow_context_canonical.json",
             Path("/app/runtime/revo/revo_flow_context.json"),
             Path(__file__).parent.parent / "runtime" / "revo" / "revo_flow_context.json",
         ]
@@ -95,16 +110,41 @@ class NexusDataBridge:
             except Exception:
                 continue
             out: Dict[str, Dict[str, Any]] = {}
-            if isinstance(raw, dict):
-                for row in raw.values():
-                    if isinstance(row, dict) and row.get("symbol"):
-                        out[str(row["symbol"]).upper()] = row
+            rows = raw.get("pairs", raw) if isinstance(raw, dict) else {}
+            if isinstance(rows, dict):
+                for key, row in rows.items():
+                    if isinstance(row, dict):
+                        symbol = row.get("symbol") or key
+                        if symbol:
+                            out[str(symbol).upper()] = row
+            if not out:
+                continue
             self._flow_cache = out
             self._flow_cache_ts = now
             return out
         self._flow_cache = {}
         self._flow_cache_ts = now
         return self._flow_cache
+
+    async def _fetch_flow_on_demand(self, symbol: str) -> Dict[str, Any]:
+        """Fetch fresh symbol flow when batch artifact does not cover it."""
+        url = f"{self.api_url}/flow/{symbol.upper()}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, params={"exchange": "bybit"},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        return {"flow_lookup_status": f"HTTP_{resp.status}", "flow_symbol_found": False}
+                    row = await resp.json()
+        except Exception as exc:
+            return {"flow_lookup_status": f"FETCH_ERROR:{type(exc).__name__}", "flow_symbol_found": False}
+        ready = bool(row.get("data_ready")) and not bool(row.get("data_stale"))
+        row["flow_lookup_status"] = "ON_DEMAND_OK" if ready else "ON_DEMAND_NOT_READY"
+        row["flow_symbol_found"] = ready
+        row["flow_lookup_source"] = "nexus_api_bybit"
+        return row
 
     def _load_oi_5m_raw(self, symbol: str) -> Dict[str, Any]:
         """Derive OI 5m/15m/1h from sidecar raw 5m Bybit snapshots when available.
@@ -419,15 +459,62 @@ class NexusDataBridge:
                 "cache_age_sec": 0.0,
             }
 
-        price = float(df_5m['close'].iloc[-1])
+        # Price provenance is mandatory: validation may use stale enrichment,
+        # execution must require price_fresh.
+        price_source, price_age_sec = "nexus_cache", 0.0
+        if 'timestamp' in df_5m.columns or 'open_time' in df_5m.columns:
+            ts_col = 'timestamp' if 'timestamp' in df_5m.columns else 'open_time'
+            last_ts = pd.to_datetime(df_5m[ts_col].iloc[-1])
+            age_sec = (pd.Timestamp.now(tz='UTC') - last_ts).total_seconds()
+            price_age_sec = max(0.0, age_sec)
+
+            if age_sec > 1800:  # Data older than 30min
+                price = None
+                # Try Binance REST first
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                price = float(data['price'])
+                                price_source, price_age_sec = "binance_rest", 0.0
+                except Exception:
+                    pass
+                
+                # Fallback to Bybit if Binance failed (symbol not on Binance or other error)
+                if price is None:
+                    try:
+                        df_bybit = await self._fetch_klines_from_api(symbol, "5m", limit=1)
+                        if df_bybit is not None and not df_bybit.empty:
+                            price = float(df_bybit['close'].iloc[-1])
+                            price_source, price_age_sec = "bybit_api", 0.0
+                    except Exception:
+                        pass
+                
+                # Last resort is enrichment-only; provenance prevents execution.
+                if price is None:
+                    price = float(df_5m['close'].iloc[-1])
+                    price_source = "stale_cache"
+            else:
+                price = float(df_5m['close'].iloc[-1])
+        else:
+            price = float(df_5m['close'].iloc[-1])
         rsi = self._calc_rsi(df_5m['close'], period=14)
         cvd_result = self._calc_cvd_proxy(df_5m, source="nexus_cache")
         cvd_zscore = cvd_result["cvd_zscore"]
         cvd_source = cvd_result["cvd_source"]
         imbalance = cvd_zscore / 3.0
 
-        # Prefer fresh Revo scanner flow/DB OI over stale legacy latest_scan_*.json.
+        # Prefer batch scanner flow; fetch symbol directly when batch misses it.
         flow_row = self._load_revo_flow_context().get(symbol.upper(), {})
+        if flow_row:
+            flow_row = dict(flow_row)
+            flow_row.setdefault("flow_lookup_status", "BATCH_OK")
+            flow_row.setdefault("flow_symbol_found", True)
+            flow_row.setdefault("flow_lookup_source", "scanner_batch")
+        else:
+            flow_row = await self._fetch_flow_on_demand(symbol)
         oi_metrics = {
             "oi_change_5m_pct": None,
             "oi_change_15m_pct": flow_row.get("oi_delta_pct_15m"),
@@ -494,8 +581,12 @@ class NexusDataBridge:
             "data_quality": flow_row.get("data_quality"),
             "flow_source": flow_row.get("source"),
             "flow_ts": flow_row.get("ts"),
-            "source": "revo_flow_context" if flow_row else "nexus_cache",
+            "flow_lookup_status": flow_row.get("flow_lookup_status"),
+            "flow_symbol_found": bool(flow_row.get("flow_symbol_found")),
+            "flow_lookup_source": flow_row.get("flow_lookup_source"),
+            "source": "revo_flow_context" if flow_row.get("flow_symbol_found") else "nexus_cache",
             "cache_age_sec": cache_age_sec,
+            **price_metadata(price_source, price_age_sec),
             **oi_metrics,
         }
 

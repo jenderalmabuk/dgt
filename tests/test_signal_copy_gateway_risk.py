@@ -16,8 +16,73 @@ class Trader:
     async def submit_open(self, **kwargs):
         return {"ok": True}
 
+    async def _get_fresh_open_quote(self, symbol):
+        prices = {"KAITOUSDT": 1.21, "DEXEUSDT": 3.866, "LAUSDT": 0.0688}
+        return {"price": prices[symbol], "price_fresh": True, "source": "test"}
+
 
 class SignalCopyGatewayRiskTest(unittest.TestCase):
+    def test_disabled_risk_reports_exact_owner(self):
+        manager = RiskManager(1000)
+        manager.trading_enabled = False
+        manager.trading_disable_reason = "MAX_DRAWDOWN"
+        result = manager.check_risk_limits()
+        self.assertEqual(result["reason"], "Trading disabled: MAX_DRAWDOWN")
+
+    def test_max_drawdown_sets_lock_owner(self):
+        manager = RiskManager(1000)
+        manager.current_equity = 800
+        manager.daily_start_balance = 800
+        result = manager.check_risk_limits()
+        self.assertEqual(result["reason"], "Max drawdown reached")
+        self.assertEqual(manager.trading_disable_reason, "MAX_DRAWDOWN")
+
+    def test_paper_sample_mode_records_but_does_not_lock_on_drawdown(self):
+        with patch.dict(os.environ, {"GATEWAY_PAPER_MAINNET": "true", "PAPER_SAMPLE_IGNORE_MAX_DRAWDOWN": "true"}):
+            manager = RiskManager(1000)
+        manager.current_equity = 800
+        manager.daily_start_balance = 800
+        result = manager.check_risk_limits(skip_entry_cooldown=True, skip_cluster_limit=True)
+        self.assertNotEqual(result["reason"], "Max drawdown reached")
+        self.assertTrue(manager.trading_enabled)
+        self.assertAlmostEqual(manager.get_current_drawdown(), 20.0)
+
+    def test_real_mode_never_ignores_max_drawdown(self):
+        with patch.dict(os.environ, {"GATEWAY_PAPER_MAINNET": "false", "PAPER_SAMPLE_IGNORE_MAX_DRAWDOWN": "true"}):
+            manager = RiskManager(1000)
+        manager.current_equity = 800
+        manager.daily_start_balance = 800
+        result = manager.check_risk_limits(skip_entry_cooldown=True, skip_cluster_limit=True)
+        self.assertEqual(result["reason"], "Max drawdown reached")
+        self.assertEqual(manager.trading_disable_reason, "MAX_DRAWDOWN")
+
+    def test_daily_reset_reenables_only_daily_owned_lock(self):
+        from datetime import timedelta
+        manager = RiskManager(1000)
+        manager.trading_enabled = False
+        manager.daily_loss_hit = True
+        manager.trading_disable_reason = "DAILY_LOSS"
+        manager.last_daily_reset = manager.last_daily_reset - timedelta(days=1)
+        manager._reset_daily_if_needed()
+        self.assertTrue(manager.trading_enabled)
+        self.assertEqual(manager.trading_disable_reason, "")
+
+        manager.trading_enabled = False
+        manager.trading_disable_reason = "MANUAL"
+        manager.last_daily_reset = manager.last_daily_reset - timedelta(days=1)
+        manager._reset_daily_if_needed()
+        self.assertFalse(manager.trading_enabled)
+        self.assertEqual(manager.trading_disable_reason, "MANUAL")
+
+    def test_restart_equity_restore_resets_daily_baseline(self):
+        manager = RiskManager(1000)
+        manager.trading_enabled = False
+        manager.daily_loss_hit = True
+        manager.sync_balance(938.09, reset_daily_baseline=True)
+        self.assertTrue(manager.trading_enabled)
+        self.assertFalse(manager.daily_loss_hit)
+        self.assertAlmostEqual(manager.get_daily_pnl_pct(), 0.0)
+
     def test_running_slot_cap_is_30_paper_and_20_real(self):
         class SlotsTrader:
             def __init__(self, count):
@@ -35,12 +100,13 @@ class SignalCopyGatewayRiskTest(unittest.TestCase):
             self.assertFalse(asyncio.run(real.reserve_open_risk("NEWUSDT", 1.0)))
 
     def test_global_open_risk_paper_and_real_caps(self):
-        trader = Trader({"A": {"side": "LONG", "entry_price": 100, "sl_price": 90, "qty": 19}})
+        trader = Trader({"A": {"side": "LONG", "entry_price": 100, "sl_price": 90, "qty": 18}})
         with patch.dict("os.environ", {"GATEWAY_PAPER_MAINNET": "true", "MAX_GLOBAL_OPEN_RISK_PCT": "0.20"}):
             risk = RiskManager(1000)
         risk.trader = trader
-        self.assertAlmostEqual(risk.get_active_open_risk_total(), 190.0)
-        self.assertTrue(asyncio.run(risk.reserve_open_risk("B", 10.0)))
+        self.assertAlmostEqual(risk.get_active_open_risk_total(), 182.519595)
+        remaining = risk.get_parallel_open_risk_budget() - risk.get_active_open_risk_total()
+        self.assertTrue(asyncio.run(risk.reserve_open_risk("B", remaining)))
         self.assertFalse(asyncio.run(risk.reserve_open_risk("C", 0.01)))
         with patch.dict("os.environ", {"GATEWAY_PAPER_MAINNET": "false"}, clear=False):
             risk_real = RiskManager(1000)
@@ -78,9 +144,34 @@ class SignalCopyGatewayRiskTest(unittest.TestCase):
         trader = Trader({"A": {"side": "SHORT", "entry_price": 100, "sl_price": 110, "qty": 2}})
         risk = RiskManager(1000)
         risk.trader = trader
-        self.assertAlmostEqual(risk.get_active_open_risk_total(), 20.0)
+        self.assertAlmostEqual(risk.get_active_open_risk_total(), 20.320055)
         trader.positions["A"]["qty"] = 1
-        self.assertAlmostEqual(risk.get_active_open_risk_total(), 10.0)
+        self.assertAlmostEqual(risk.get_active_open_risk_total(), 10.1600275)
+
+    def test_active_open_risk_includes_entry_exit_fees_and_exit_slippage(self):
+        trader = Trader({"A": {"side": "LONG", "entry_price": 100, "sl_price": 90, "qty": 1}})
+        risk = RiskManager(1000)
+        risk.trader = trader
+        with patch.dict(os.environ, {"PAPER_SLIPPAGE_PCT": "0.001", "PAPER_TAKER_FEE_PCT": "0.002"}):
+            self.assertAlmostEqual(risk.get_active_open_risk_total(), 10.46982)
+
+    def test_gateway_commits_trader_actual_fill_max_loss(self):
+        class ActualFillTrader(Trader):
+            async def submit_open(self, **kwargs):
+                return {"ok": True, "max_loss_usd_at_fill": 7.25}
+
+        trader = ActualFillTrader()
+        risk = RiskManager(1000)
+        risk.trader = trader
+        gateway = ExecutionGateway(trader, risk)
+        intent = OrderIntent.from_dict({
+            "source": "SIGNAL_COPY", "symbol": "KAITOUSDT", "side": "LONG",
+            "entry_price": 1.21, "sl_price": 1.10, "tps": [1.24], "notional": 100,
+        })
+        with patch.object(risk, "commit_open_trade", wraps=risk.commit_open_trade) as commit:
+            result = asyncio.run(gateway.execute(intent))
+        self.assertTrue(result.ok, result.reason)
+        self.assertEqual(commit.call_args.kwargs["risk_amount"], 7.25)
 
     def test_zero_same_direction_cap_disables_direction_gate(self):
         trader = Trader({f"L{i}": {"side": "LONG", "notional": 10} for i in range(3)})
@@ -163,8 +254,8 @@ class SignalCopyGatewayRiskTest(unittest.TestCase):
 
     def test_paper_mark_worse_than_signal_resizes_risk(self):
         class MarkTrader(Trader):
-            async def _get_mark_price(self, symbol):
-                return 0.0700  # LONG: worse than signal 0.0688
+            async def _get_fresh_open_quote(self, symbol):
+                return {"price": 0.0700, "price_fresh": True, "source": "test"}
 
         trader = MarkTrader()
         risk = RiskManager(1000)

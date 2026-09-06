@@ -33,6 +33,7 @@ COPY --chown=nexus:nexus risk/ ./risk/
 COPY --chown=nexus:nexus utils/ ./utils/
 # Copy nexus bot files
 COPY --chown=nexus:nexus bots/ ./bots/
+COPY --chown=nexus:nexus analyst_bot/ ./analyst_bot/
 
 # Normalize read perms: host sources may be 0600 (owner-only). Baked in, those
 # become readable only by uid 999, but the gateway service runs as uid 1000 (to

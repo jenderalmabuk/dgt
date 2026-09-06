@@ -1,0 +1,811 @@
+{
+  "generated_at": "2026-07-31 02:13:57.748448+00:00",
+  "symbols": 465,
+  "fetch_errors": [],
+  "coverage": {
+    "start": "2026-07-20 19:00:00+00:00",
+    "end": "2026-07-31 01:45:00+00:00"
+  },
+  "scenarios": {
+    "d0_e3": {
+      "all": {
+        "n": 131,
+        "wr": 53.4,
+        "pf": 2.3,
+        "net_unit": 79.0,
+        "maxdd_unit": 5.0
+      },
+      "is": {
+        "n": 78,
+        "wr": 53.8,
+        "pf": 2.33,
+        "net_unit": 48.0,
+        "maxdd_unit": 5.0
+      },
+      "oos": {
+        "n": 53,
+        "wr": 52.8,
+        "pf": 2.24,
+        "net_unit": 31.0,
+        "maxdd_unit": 5.0
+      },
+      "long": {
+        "n": 64,
+        "wr": 48.4,
+        "pf": 1.88,
+        "net_unit": 29.0,
+        "maxdd_unit": 5.0
+      },
+      "short": {
+        "n": 67,
+        "wr": 58.2,
+        "pf": 2.79,
+        "net_unit": 50.0,
+        "maxdd_unit": 7.0
+      },
+      "delay_bars": 0,
+      "expiry_bars": 3,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 131,
+        "expired_orders": 536
+      },
+      "fill_rate_pct": 19.6,
+      "elapsed_sec": 22.2
+    },
+    "d0_e6": {
+      "all": {
+        "n": 180,
+        "wr": 52.8,
+        "pf": 2.22,
+        "net_unit": 103.8519,
+        "maxdd_unit": 6.0
+      },
+      "is": {
+        "n": 108,
+        "wr": 52.8,
+        "pf": 2.24,
+        "net_unit": 63.0,
+        "maxdd_unit": 5.0
+      },
+      "oos": {
+        "n": 72,
+        "wr": 52.8,
+        "pf": 2.2,
+        "net_unit": 40.8519,
+        "maxdd_unit": 5.0
+      },
+      "long": {
+        "n": 87,
+        "wr": 46.0,
+        "pf": 1.7,
+        "net_unit": 33.0,
+        "maxdd_unit": 5.0
+      },
+      "short": {
+        "n": 93,
+        "wr": 59.1,
+        "pf": 2.86,
+        "net_unit": 70.8519,
+        "maxdd_unit": 7.0
+      },
+      "delay_bars": 0,
+      "expiry_bars": 6,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 180,
+        "expired_orders": 487
+      },
+      "fill_rate_pct": 27.0,
+      "elapsed_sec": 22.2
+    },
+    "d0_e9": {
+      "all": {
+        "n": 207,
+        "wr": 48.8,
+        "pf": 1.89,
+        "net_unit": 94.8519,
+        "maxdd_unit": 8.0
+      },
+      "is": {
+        "n": 124,
+        "wr": 49.2,
+        "pf": 1.94,
+        "net_unit": 59.0,
+        "maxdd_unit": 7.0
+      },
+      "oos": {
+        "n": 83,
+        "wr": 48.2,
+        "pf": 1.83,
+        "net_unit": 35.8519,
+        "maxdd_unit": 6.0
+      },
+      "long": {
+        "n": 101,
+        "wr": 44.6,
+        "pf": 1.61,
+        "net_unit": 34.0,
+        "maxdd_unit": 7.0
+      },
+      "short": {
+        "n": 106,
+        "wr": 52.8,
+        "pf": 2.22,
+        "net_unit": 60.8519,
+        "maxdd_unit": 12.0
+      },
+      "delay_bars": 0,
+      "expiry_bars": 9,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 207,
+        "expired_orders": 460
+      },
+      "fill_rate_pct": 31.0,
+      "elapsed_sec": 23.0
+    },
+    "d0_e12": {
+      "all": {
+        "n": 223,
+        "wr": 47.5,
+        "pf": 1.8,
+        "net_unit": 93.8519,
+        "maxdd_unit": 9.0
+      },
+      "is": {
+        "n": 133,
+        "wr": 49.6,
+        "pf": 1.97,
+        "net_unit": 65.0,
+        "maxdd_unit": 8.0
+      },
+      "oos": {
+        "n": 90,
+        "wr": 44.4,
+        "pf": 1.58,
+        "net_unit": 28.8519,
+        "maxdd_unit": 9.0
+      },
+      "long": {
+        "n": 108,
+        "wr": 44.4,
+        "pf": 1.6,
+        "net_unit": 36.0,
+        "maxdd_unit": 8.0
+      },
+      "short": {
+        "n": 115,
+        "wr": 50.4,
+        "pf": 2.01,
+        "net_unit": 57.8519,
+        "maxdd_unit": 13.0
+      },
+      "delay_bars": 0,
+      "expiry_bars": 12,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 223,
+        "expired_orders": 444
+      },
+      "fill_rate_pct": 33.4,
+      "elapsed_sec": 23.6
+    },
+    "d0_e18": {
+      "all": {
+        "n": 239,
+        "wr": 48.1,
+        "pf": 1.84,
+        "net_unit": 103.8523,
+        "maxdd_unit": 11.0
+      },
+      "is": {
+        "n": 143,
+        "wr": 49.7,
+        "pf": 1.97,
+        "net_unit": 70.0,
+        "maxdd_unit": 11.0
+      },
+      "oos": {
+        "n": 96,
+        "wr": 45.8,
+        "pf": 1.65,
+        "net_unit": 33.8523,
+        "maxdd_unit": 11.0
+      },
+      "long": {
+        "n": 118,
+        "wr": 44.9,
+        "pf": 1.63,
+        "net_unit": 41.0,
+        "maxdd_unit": 10.0
+      },
+      "short": {
+        "n": 121,
+        "wr": 51.2,
+        "pf": 2.07,
+        "net_unit": 62.8523,
+        "maxdd_unit": 13.0
+      },
+      "delay_bars": 0,
+      "expiry_bars": 18,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 239,
+        "expired_orders": 428
+      },
+      "fill_rate_pct": 35.8,
+      "elapsed_sec": 23.7
+    },
+    "d0_e24": {
+      "all": {
+        "n": 251,
+        "wr": 47.4,
+        "pf": 1.78,
+        "net_unit": 102.3808,
+        "maxdd_unit": 11.0
+      },
+      "is": {
+        "n": 150,
+        "wr": 48.7,
+        "pf": 1.9,
+        "net_unit": 69.0,
+        "maxdd_unit": 10.0
+      },
+      "oos": {
+        "n": 101,
+        "wr": 45.5,
+        "pf": 1.61,
+        "net_unit": 33.3808,
+        "maxdd_unit": 11.0
+      },
+      "long": {
+        "n": 125,
+        "wr": 45.6,
+        "pf": 1.65,
+        "net_unit": 44.5286,
+        "maxdd_unit": 11.0
+      },
+      "short": {
+        "n": 126,
+        "wr": 49.2,
+        "pf": 1.9,
+        "net_unit": 57.8523,
+        "maxdd_unit": 13.0
+      },
+      "delay_bars": 0,
+      "expiry_bars": 24,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 251,
+        "expired_orders": 416
+      },
+      "fill_rate_pct": 37.6,
+      "elapsed_sec": 23.4
+    },
+    "d0_e36": {
+      "all": {
+        "n": 283,
+        "wr": 47.3,
+        "pf": 1.77,
+        "net_unit": 115.3808,
+        "maxdd_unit": 11.0
+      },
+      "is": {
+        "n": 169,
+        "wr": 47.3,
+        "pf": 1.8,
+        "net_unit": 71.0,
+        "maxdd_unit": 11.0
+      },
+      "oos": {
+        "n": 114,
+        "wr": 47.4,
+        "pf": 1.74,
+        "net_unit": 44.3808,
+        "maxdd_unit": 5.4714
+      },
+      "long": {
+        "n": 138,
+        "wr": 45.7,
+        "pf": 1.66,
+        "net_unit": 49.5286,
+        "maxdd_unit": 12.0
+      },
+      "short": {
+        "n": 145,
+        "wr": 49.0,
+        "pf": 1.89,
+        "net_unit": 65.8523,
+        "maxdd_unit": 10.0
+      },
+      "delay_bars": 0,
+      "expiry_bars": 36,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 283,
+        "expired_orders": 384
+      },
+      "fill_rate_pct": 42.4,
+      "elapsed_sec": 23.1
+    },
+    "d0_e48": {
+      "all": {
+        "n": 313,
+        "wr": 46.6,
+        "pf": 1.72,
+        "net_unit": 120.7725,
+        "maxdd_unit": 12.0
+      },
+      "is": {
+        "n": 187,
+        "wr": 46.0,
+        "pf": 1.7,
+        "net_unit": 71.0,
+        "maxdd_unit": 12.0
+      },
+      "oos": {
+        "n": 126,
+        "wr": 47.6,
+        "pf": 1.75,
+        "net_unit": 49.7725,
+        "maxdd_unit": 6.0797
+      },
+      "long": {
+        "n": 146,
+        "wr": 44.5,
+        "pf": 1.59,
+        "net_unit": 47.5286,
+        "maxdd_unit": 12.0
+      },
+      "short": {
+        "n": 167,
+        "wr": 48.5,
+        "pf": 1.85,
+        "net_unit": 73.244,
+        "maxdd_unit": 12.0
+      },
+      "delay_bars": 0,
+      "expiry_bars": 48,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 313,
+        "expired_orders": 354
+      },
+      "fill_rate_pct": 46.9,
+      "elapsed_sec": 23.3
+    },
+    "d2_e3": {
+      "all": {
+        "n": 94,
+        "wr": 45.7,
+        "pf": 1.69,
+        "net_unit": 35.0,
+        "maxdd_unit": 6.0
+      },
+      "is": {
+        "n": 56,
+        "wr": 41.1,
+        "pf": 1.39,
+        "net_unit": 13.0,
+        "maxdd_unit": 6.0
+      },
+      "oos": {
+        "n": 38,
+        "wr": 52.6,
+        "pf": 2.22,
+        "net_unit": 22.0,
+        "maxdd_unit": 4.0
+      },
+      "long": {
+        "n": 47,
+        "wr": 44.7,
+        "pf": 1.62,
+        "net_unit": 16.0,
+        "maxdd_unit": 5.0
+      },
+      "short": {
+        "n": 47,
+        "wr": 46.8,
+        "pf": 1.76,
+        "net_unit": 19.0,
+        "maxdd_unit": 6.0
+      },
+      "delay_bars": 2,
+      "expiry_bars": 3,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 94,
+        "expired_orders": 573
+      },
+      "fill_rate_pct": 14.1,
+      "elapsed_sec": 25.0
+    },
+    "d2_e6": {
+      "all": {
+        "n": 151,
+        "wr": 48.3,
+        "pf": 1.86,
+        "net_unit": 66.8519,
+        "maxdd_unit": 6.0
+      },
+      "is": {
+        "n": 90,
+        "wr": 45.6,
+        "pf": 1.67,
+        "net_unit": 33.0,
+        "maxdd_unit": 6.0
+      },
+      "oos": {
+        "n": 61,
+        "wr": 52.5,
+        "pf": 2.17,
+        "net_unit": 33.8519,
+        "maxdd_unit": 3.0
+      },
+      "long": {
+        "n": 75,
+        "wr": 42.7,
+        "pf": 1.49,
+        "net_unit": 21.0,
+        "maxdd_unit": 6.0
+      },
+      "short": {
+        "n": 76,
+        "wr": 53.9,
+        "pf": 2.31,
+        "net_unit": 45.8519,
+        "maxdd_unit": 6.0
+      },
+      "delay_bars": 2,
+      "expiry_bars": 6,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 151,
+        "expired_orders": 516
+      },
+      "fill_rate_pct": 22.6,
+      "elapsed_sec": 23.4
+    },
+    "d2_e9": {
+      "all": {
+        "n": 181,
+        "wr": 44.2,
+        "pf": 1.57,
+        "net_unit": 57.8519,
+        "maxdd_unit": 8.0
+      },
+      "is": {
+        "n": 108,
+        "wr": 41.7,
+        "pf": 1.43,
+        "net_unit": 27.0,
+        "maxdd_unit": 8.0
+      },
+      "oos": {
+        "n": 73,
+        "wr": 47.9,
+        "pf": 1.81,
+        "net_unit": 30.8519,
+        "maxdd_unit": 5.0
+      },
+      "long": {
+        "n": 90,
+        "wr": 41.1,
+        "pf": 1.4,
+        "net_unit": 21.0,
+        "maxdd_unit": 7.0
+      },
+      "short": {
+        "n": 91,
+        "wr": 47.3,
+        "pf": 1.77,
+        "net_unit": 36.8519,
+        "maxdd_unit": 11.0
+      },
+      "delay_bars": 2,
+      "expiry_bars": 9,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 181,
+        "expired_orders": 486
+      },
+      "fill_rate_pct": 27.1,
+      "elapsed_sec": 24.9
+    },
+    "d2_e12": {
+      "all": {
+        "n": 197,
+        "wr": 43.1,
+        "pf": 1.51,
+        "net_unit": 56.8519,
+        "maxdd_unit": 10.0
+      },
+      "is": {
+        "n": 118,
+        "wr": 42.4,
+        "pf": 1.47,
+        "net_unit": 32.0,
+        "maxdd_unit": 10.0
+      },
+      "oos": {
+        "n": 79,
+        "wr": 44.3,
+        "pf": 1.56,
+        "net_unit": 24.8519,
+        "maxdd_unit": 6.0
+      },
+      "long": {
+        "n": 97,
+        "wr": 41.2,
+        "pf": 1.4,
+        "net_unit": 23.0,
+        "maxdd_unit": 8.0
+      },
+      "short": {
+        "n": 100,
+        "wr": 45.0,
+        "pf": 1.62,
+        "net_unit": 33.8519,
+        "maxdd_unit": 12.0
+      },
+      "delay_bars": 2,
+      "expiry_bars": 12,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 197,
+        "expired_orders": 470
+      },
+      "fill_rate_pct": 29.5,
+      "elapsed_sec": 25.4
+    },
+    "d2_e18": {
+      "all": {
+        "n": 215,
+        "wr": 44.2,
+        "pf": 1.57,
+        "net_unit": 67.8523,
+        "maxdd_unit": 13.0
+      },
+      "is": {
+        "n": 129,
+        "wr": 43.4,
+        "pf": 1.53,
+        "net_unit": 39.0,
+        "maxdd_unit": 13.0
+      },
+      "oos": {
+        "n": 86,
+        "wr": 45.3,
+        "pf": 1.61,
+        "net_unit": 28.8523,
+        "maxdd_unit": 8.0
+      },
+      "long": {
+        "n": 109,
+        "wr": 42.2,
+        "pf": 1.46,
+        "net_unit": 29.0,
+        "maxdd_unit": 10.0
+      },
+      "short": {
+        "n": 106,
+        "wr": 46.2,
+        "pf": 1.68,
+        "net_unit": 38.8523,
+        "maxdd_unit": 12.0
+      },
+      "delay_bars": 2,
+      "expiry_bars": 18,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 215,
+        "expired_orders": 452
+      },
+      "fill_rate_pct": 32.2,
+      "elapsed_sec": 24.6
+    },
+    "d2_e24": {
+      "all": {
+        "n": 228,
+        "wr": 43.4,
+        "pf": 1.51,
+        "net_unit": 65.3808,
+        "maxdd_unit": 12.0
+      },
+      "is": {
+        "n": 136,
+        "wr": 41.9,
+        "pf": 1.44,
+        "net_unit": 35.0,
+        "maxdd_unit": 12.0
+      },
+      "oos": {
+        "n": 92,
+        "wr": 45.7,
+        "pf": 1.61,
+        "net_unit": 30.3808,
+        "maxdd_unit": 8.0
+      },
+      "long": {
+        "n": 117,
+        "wr": 42.7,
+        "pf": 1.47,
+        "net_unit": 31.5286,
+        "maxdd_unit": 11.0
+      },
+      "short": {
+        "n": 111,
+        "wr": 44.1,
+        "pf": 1.55,
+        "net_unit": 33.8523,
+        "maxdd_unit": 12.0
+      },
+      "delay_bars": 2,
+      "expiry_bars": 24,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 228,
+        "expired_orders": 439
+      },
+      "fill_rate_pct": 34.2,
+      "elapsed_sec": 25.9
+    },
+    "d2_e36": {
+      "all": {
+        "n": 263,
+        "wr": 44.1,
+        "pf": 1.55,
+        "net_unit": 81.3808,
+        "maxdd_unit": 13.0
+      },
+      "is": {
+        "n": 157,
+        "wr": 43.3,
+        "pf": 1.53,
+        "net_unit": 47.0,
+        "maxdd_unit": 13.0
+      },
+      "oos": {
+        "n": 106,
+        "wr": 45.3,
+        "pf": 1.59,
+        "net_unit": 34.3808,
+        "maxdd_unit": 6.0
+      },
+      "long": {
+        "n": 131,
+        "wr": 42.7,
+        "pf": 1.47,
+        "net_unit": 35.5286,
+        "maxdd_unit": 12.0
+      },
+      "short": {
+        "n": 132,
+        "wr": 45.5,
+        "pf": 1.64,
+        "net_unit": 45.8523,
+        "maxdd_unit": 11.0
+      },
+      "delay_bars": 2,
+      "expiry_bars": 36,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 263,
+        "expired_orders": 404
+      },
+      "fill_rate_pct": 39.4,
+      "elapsed_sec": 24.3
+    },
+    "d2_e48": {
+      "all": {
+        "n": 293,
+        "wr": 43.7,
+        "pf": 1.53,
+        "net_unit": 86.7725,
+        "maxdd_unit": 14.0
+      },
+      "is": {
+        "n": 175,
+        "wr": 42.3,
+        "pf": 1.47,
+        "net_unit": 47.0,
+        "maxdd_unit": 14.0
+      },
+      "oos": {
+        "n": 118,
+        "wr": 45.8,
+        "pf": 1.62,
+        "net_unit": 39.7725,
+        "maxdd_unit": 6.0797
+      },
+      "long": {
+        "n": 139,
+        "wr": 41.7,
+        "pf": 1.41,
+        "net_unit": 33.5286,
+        "maxdd_unit": 12.0
+      },
+      "short": {
+        "n": 154,
+        "wr": 45.5,
+        "pf": 1.63,
+        "net_unit": 53.244,
+        "maxdd_unit": 13.0
+      },
+      "delay_bars": 2,
+      "expiry_bars": 48,
+      "errors": [],
+      "funnel": {
+        "zones_found": 3254,
+        "zones_touched": 3161,
+        "mss_confirmed": 667,
+        "pending_orders": 667,
+        "fills": 293,
+        "expired_orders": 374
+      },
+      "fill_rate_pct": 43.9,
+      "elapsed_sec": 23.9
+    }
+  }
+}

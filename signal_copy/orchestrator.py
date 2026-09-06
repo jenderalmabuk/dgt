@@ -21,6 +21,7 @@ embedded inside the main fusion bot. Anything missing degrades gracefully:
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -347,6 +348,11 @@ class SignalCopyOrchestrator:
             logger.warning("[SIGNAL_COPY] metrics fetch failed for %s: %s", symbol, exc)
             return {}
 
+    async def _fetch_execution_quote(self, symbol: str) -> Dict[str, Any]:
+        """Fresh exchange truth for route and pending lifecycle decisions."""
+        from .fresh_quote import fetch_fresh_quote
+        return await fetch_fresh_quote(symbol)
+
     async def _handle_provider_update(self, text: str, source_chat_id: Optional[int]) -> bool:
         from .provider_updates import UpdateKind, parse_provider_update
         update = parse_provider_update(text, source_chat_id)
@@ -452,9 +458,15 @@ class SignalCopyOrchestrator:
         logger.info("[SIGNAL_COPY] %s", build_read_report(text, cls, sig))
         if not calib and self._is_duplicate(sig):
             logger.info("[SIGNAL_COPY] duplicate signal ignored: %s", sig.summary())
+            from . import signal_lifecycle
+            signal_lifecycle.record(sig.signal_id, "DUPLICATE", symbol=sig.symbol,
+                                    side=sig.side.value, reason="duplicate signal ignored")
             return
 
         logger.info("[SIGNAL_COPY] parsed: %s", sig.summary())
+        from . import signal_lifecycle
+        signal_lifecycle.record(sig.signal_id, "PARSED", symbol=sig.symbol,
+                                side=sig.side.value, source_chat_id=sig.source_chat_id)
 
         # (parse summary collected via build_parser_report after validation)
 
@@ -544,9 +556,16 @@ class SignalCopyOrchestrator:
         except Exception as exc:
             logger.warning("[SIGNAL_COPY] normalize failed: %s", exc)
         result = validate_signal(sig, metrics)
-        logger.info("[SIGNAL_COPY] %s -> %s score=%.1f (tp=%s sl=%s entry=%s tf=%s)",
+        logger.info("[SIGNAL_COPY] %s -> %s score=%.1f (tp=%s sl=%s entry=%s tf=%s) reasons=%s",
                     sig.symbol, result.verdict.value, result.score,
-                    sig.tp_source, sig.sl_source, sig.entry_type, sig.timeframe or "-")
+                    sig.tp_source, sig.sl_source, sig.entry_type, sig.timeframe or "-",
+                    result.hard_blocks or [])
+        signal_lifecycle.record(
+            sig.signal_id,
+            "VALIDATED" if result.verdict == Verdict.VALID else "VALIDATION_REJECTED",
+            verdict=result.verdict.value, score=result.score,
+            reason="; ".join(result.hard_blocks or []),
+        )
 
         # --- Build ONE consolidated report and send ---
         from .telegram_formatter import build_parser_report
@@ -662,7 +681,7 @@ class SignalCopyOrchestrator:
                          and self.executor is not None and self.auto_execute)
             get_outcome_tracker().track(
                 result.signal, metrics,
-                verdict=result.verdict.value, was_executed=bool(_executed),
+                verdict=result.verdict.value, execution_intended=bool(_executed),
             )
         except Exception as exc:
             logger.debug("[OUTCOME] snapshot skipped: %s", exc)
@@ -674,9 +693,11 @@ class SignalCopyOrchestrator:
         # Calibration channel: validate only, never execute
         if calib:
             logger.info("[SIGNAL_COPY] calib channel — skip execution for %s", sig.symbol)
+            signal_lifecycle.record(sig.signal_id, "CALIBRATION_ONLY")
             return
 
         if self.executor is None:
+            signal_lifecycle.record(sig.signal_id, "NO_EXECUTOR")
             return  # consolidated report already sent above
 
         if self.auto_execute:
@@ -685,6 +706,7 @@ class SignalCopyOrchestrator:
             status = await self._execute_token(result.signal.signal_id)
             # Execution status sent via trades bot, not parser bot
             return
+        signal_lifecycle.record(sig.signal_id, "AWAITING_CONFIRMATION")
 
         # Normal path: register + ask user to confirm via the bot
         await self.confirmations.register(result)
@@ -700,7 +722,7 @@ class SignalCopyOrchestrator:
         (False, -1, cap) so a transient hiccup never blocks a fill. The gateway
         still enforces MAX_OPEN_POS_GLOBAL as a hard backstop regardless."""
         from .execution_config import MAX_OPEN_POS_GLOBAL
-        cap = int(MAX_OPEN_POS_GLOBAL)
+        cap = int(os.getenv("SIGNAL_COPY_MAX_RUNNING_POSITIONS", str(MAX_OPEN_POS_GLOBAL)))
         client = getattr(self.trader, "client", None)
         if client is None or not hasattr(client, "portfolio"):
             return (False, -1, cap)  # dry-run / no gateway -> gateway backstops
@@ -724,19 +746,24 @@ class SignalCopyOrchestrator:
             return False
         at_max, cnt, cap = await self._at_max_positions()
         pending = len(getattr(self, "_pending_limits", {}) or {})
-        # Dormant pending limits consume neither running slots nor portfolio
-        # risk. Gateway still atomically backstops running count at fill time.
+        # Paper-mainnet collection cap applies to actual open positions only.
         if cnt >= 0:
             at_max = cnt >= cap
         if not at_max:
+            setattr(sig, "_max_pos_notice_cap", None)
             return False
+        # Pending poll runs every 15s. Notify once per continuous full-cap state,
+        # not on every retry; execution remains WAITING_FOR_SLOT.
+        if getattr(sig, "_max_pos_notice_cap", None) == cap:
+            return True
+        setattr(sig, "_max_pos_notice_cap", cap)
         logger.info("[MAX_POS] %s parsed but NOT executed: running book full (%d active; %d pending; cap=%d)",
                     sig.symbol, cnt, pending, cap)
         try:
             await self._notify_trades_channel(
                 f"⏸️ {sig.symbol} {sig.side.value}: sinyal di-parse & valid, tapi "
                 f"TIDAK dieksekusi — kapasitas running maksimal "
-                f"({cnt}/{cap} aktif; {pending} pending tidak memakai slot). "
+                f"({cnt}/{cap} posisi aktif; {pending} pending tidak memakai slot). "
                 f"Sinyal tetap tercatat; eksekusi dilewati.")
         except Exception as exc:
             logger.error("[MAX_POS] notify failed: %s", exc)
@@ -755,13 +782,34 @@ class SignalCopyOrchestrator:
             return "Executor tidak tersedia."
 
         sig = pc.result.signal
+        from . import signal_lifecycle
+        signal_lifecycle.record(signal_id, "EXECUTION_INTENDED", execution_intended=True)
 
         from .entry_policy import EntryAction, route_entry
-        price = _f(pc.result.metrics_snapshot.get("price"))
+        live_metrics = await self._fetch_execution_quote(sig.symbol)
+        if live_metrics.get("price_fresh") is not True:
+            reason = str(live_metrics.get("price_source") or "FRESH_PRICE_UNAVAILABLE").upper()
+            await self.confirmations.mark(signal_id, ConfirmState.FAILED, note=reason)
+            signal_lifecycle.record(signal_id, "GATEWAY_REJECTED", gateway_accepted=False,
+                                    position_confirmed=False, reason=reason,
+                                    price_quote=live_metrics)
+            msg = f"✅ VALIDATED tapi ❌ NOT FILLED {sig.side.value} {sig.symbol}\nReason: {reason}"
+            await self._notify_trades_channel(msg)
+            return msg
+        price = _f(live_metrics.get("price"))
+        pc.result.metrics_snapshot.update(live_metrics)
+        logger.info("[EXEC_ROUTE] %s %s signal_id=%s price=%.8g source=%s",
+                    sig.symbol, sig.side.value, signal_id, price,
+                    live_metrics.get("price_source"))
         routing = route_entry(sig, price)
         if routing.action == EntryAction.REJECT:
             await self.confirmations.mark(signal_id, ConfirmState.EXPIRED, note=routing.code)
-            msg = f"✅ VALID tapi ❌ NOT EXECUTED {sig.side.value} {sig.symbol}\nReason: {routing.code}"
+            from . import pending_journal
+            pending_journal.record("ROUTE_REJECTED", sig, price=price, reason=routing.code,
+                                   price_quote=live_metrics)
+            logger.warning("[EXEC_ROUTE] rejected %s %s signal_id=%s reason=%s price=%.8g",
+                           sig.symbol, sig.side.value, signal_id, routing.code, price)
+            msg = f"✅ VALIDATED tapi ❌ NOT FILLED {sig.side.value} {sig.symbol}\nReason: {routing.code}"
             await self._notify_trades_channel(msg)
             return msg
         sig.active_entry = routing.entry
@@ -769,6 +817,8 @@ class SignalCopyOrchestrator:
         # provider zone. Outside waits at the nearest boundary, including a
         # pullback after TP1; provider SL/TP levels remain unchanged.
         if routing.action == EntryAction.LIMIT:
+            # Paper-mainnet hardened collection: pending setups are unlimited.
+            # Capacity applies only when a setup becomes an actual position.
             self._pending_limits[signal_id] = {
                 "result": pc.result,
                 "created": time.time(),
@@ -827,10 +877,22 @@ class SignalCopyOrchestrator:
         )
         await self.confirmations.mark(
             signal_id,
-            ConfirmState.EXECUTED if outcome.ok else ConfirmState.FAILED,
+            ConfirmState.EXECUTED if outcome.position_confirmed else ConfirmState.FAILED,
             note=outcome.reason,
         )
-        if outcome.ok and outcome.notional > 0:
+        gateway_accepted = bool(getattr(outcome, "gateway_accepted", False))
+        position_confirmed = bool(getattr(outcome, "position_confirmed", False))
+        signal_lifecycle.record(
+            signal_id,
+            "POSITION_CONFIRMED" if position_confirmed else (
+                "GATEWAY_ACCEPTED" if gateway_accepted else "GATEWAY_REJECTED"
+            ),
+            gateway_accepted=gateway_accepted,
+            position_confirmed=position_confirmed,
+            reason=outcome.reason,
+            gateway_response=getattr(outcome, "raw", None),
+        )
+        if position_confirmed and outcome.notional > 0:
             # Build rich execution message for trades channel
             exec_payload = {
                 "symbol": outcome.symbol,
@@ -1005,23 +1067,23 @@ class SignalCopyOrchestrator:
                     f"⌛ LIMIT EXPIRED {sig.symbol} {sig.side.value} @ {getattr(sig, 'active_entry', sig.entry_mid):g} "
                     f"({int(_expiry // 60)}m tanpa fill)")
                 continue
-            metrics = await self._fetch_metrics(sig.symbol)
+            metrics = await self._fetch_execution_quote(sig.symbol)
             price = _f(metrics.get("price"))
-            if price <= 0:
+            if price <= 0 or metrics.get("price_fresh") is not True:
+                logger.warning("[PENDING] skip stale/unavailable price %s source=%s age=%s",
+                               sig.symbol, metrics.get("price_source"), metrics.get("price_age_sec"))
                 continue
             data["path_high"] = max(float(data.get("path_high", price)), price)
             data["path_low"] = min(float(data.get("path_low", price)), price)
             if self._limit_reached(sig, price):
                 from .entry_policy import pending_fill_allowed
                 allowed, drift_r = pending_fill_allowed(sig, price)
-                if not allowed:
-                    self._pending_limits.pop(token, None)
+                boundary = float(getattr(sig, "active_entry", None) or sig.entry_mid)
+                adverse = price < boundary if sig.is_long else price > boundary
+                if adverse and not allowed:
                     from . import pending_journal
-                    pending_journal.record("DRIFT_REJECTED", sig, price=price, drift_r=round(drift_r, 4))
-                    await self.confirmations.mark(token, ConfirmState.EXPIRED, note="LIMIT_FILL_DRIFT_EXCEEDED")
-                    await self._notify_trades_channel(
-                        f"✅ VALID tapi ❌ NOT EXECUTED {sig.side.value} {sig.symbol}\n"
-                        f"Reason: LIMIT_FILL_DRIFT_EXCEEDED ({drift_r:.2f}R > 0.10R)")
+                    pending_journal.record("DRIFT_WAITING", sig, price=price,
+                                           drift_r=round(drift_r, 4))
                     continue
                 # Thesis-aware revalidation: historical SL/effective-target
                 # invalidation is permanent. Snapshot indicator rescoring is
@@ -1036,6 +1098,18 @@ class SignalCopyOrchestrator:
                         )
                         if not revalid.ok:
                             self._pending_limits.pop(token, None)
+                            from . import pending_journal
+                            pending_journal.record(
+                                "THESIS_REJECTED", sig, price=price,
+                                path_high=data["path_high"], path_low=data["path_low"],
+                                reason=revalid.code,
+                            )
+                            logger.warning(
+                                "[PENDING] rejected %s %s signal_id=%s reason=%s "
+                                "price=%.8g path_high=%.8g path_low=%.8g",
+                                sig.symbol, sig.side.value, token, revalid.code, price,
+                                data["path_high"], data["path_low"],
+                            )
                             await self.confirmations.mark(
                                 token, ConfirmState.EXPIRED, note=revalid.code)
                             await self._notify_trades_channel(
@@ -1046,14 +1120,14 @@ class SignalCopyOrchestrator:
                     except Exception as exc:
                         logger.warning("[PENDING] re-validation error for %s: %s "
                                        "(proceeding with entry)", sig.symbol, exc)
-                # A touched pending waits while all running slots are occupied.
-                # Keep polling it: expiry, path invalidation, and 0.10R drift
-                # remain active. Never convert it to a market chase later.
+                # Capacity applies at actual entry. Pending itself uses no slot.
                 if await self._gate_on_max_positions(sig):
-                    await self.confirmations.mark(
-                        token, ConfirmState.APPROVED, note="WAITING_FOR_SLOT")
+                    from . import pending_journal
+                    pending_journal.record("WAITING_FOR_SLOT", sig, price=price,
+                                           reason="MAX_OPEN_POSITIONS")
+                    await self.confirmations.mark(token, ConfirmState.APPROVED,
+                                                  note="WAITING_FOR_SLOT")
                     continue
-                self._pending_limits.pop(token, None)
                 await self.confirmations.mark(
                     token,
                     ConfirmState.APPROVED,
@@ -1064,19 +1138,29 @@ class SignalCopyOrchestrator:
                     dry_run=self.dry_run,
                     risk_pct=self.sizer.calc(pc.signal, pc.metrics_snapshot or {}),
                 )
+                from . import pending_journal
+                if "MAX_OPEN" in str(outcome.reason).upper():
+                    pending_journal.record("WAITING_FOR_SLOT", sig, price=price,
+                                           reason=outcome.reason)
+                    await self.confirmations.mark(token, ConfirmState.APPROVED,
+                                                  note="WAITING_FOR_SLOT")
+                    continue
+                self._pending_limits.pop(token, None)
                 await self.confirmations.mark(
                     token,
                     ConfirmState.EXECUTED if outcome.ok else ConfirmState.FAILED,
                     note=outcome.reason,
                 )
-                from . import pending_journal
                 pending_journal.record(
-                    "FILLED" if outcome.ok else "GATEWAY_REJECTED", pc.signal,
+                    "FILLED" if outcome.position_confirmed else "GATEWAY_REJECTED", pc.signal,
                     price=price, fill=outcome.entry_price, notional=outcome.notional,
                     risk_amount=outcome.risk_amount, drift_r=round(drift_r, 4),
                     rr_tp1=getattr(outcome, "rr_tp1", 0.0), reason=outcome.reason,
+                    gateway_accepted=bool(outcome.gateway_accepted),
+                    position_confirmed=bool(outcome.position_confirmed),
+                    gateway_response=getattr(outcome, "raw", None),
                 )
-                if outcome.ok and outcome.notional > 0:
+                if outcome.position_confirmed and outcome.notional > 0:
                     exec_payload = {
                         "symbol": outcome.symbol,
                         "side": outcome.side,

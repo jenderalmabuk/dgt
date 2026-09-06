@@ -366,6 +366,8 @@ def validate_signal(sig: ParsedSignal, metrics: Optional[Dict[str, Any]]) -> Val
         hard_blocks.append("symbol not in canonical Bybit∩Binance USDT perp universe")
     if not metrics.get("data_valid", False) and _f(metrics.get("price")) <= 0:
         hard_blocks.append("no valid market data for symbol")
+    if "MALFORMED_PROVIDER_LEVELS" in getattr(sig, "level_anomalies", []):
+        hard_blocks.append("MALFORMED_PROVIDER_LEVELS: provider supplied no usable TP or SL")
 
     # Geometry (TP/SL/RR) is NOT scored anymore — it only shapes the execution
     # plan. We keep only a loose safety cap to avoid clearly-broken stops.
@@ -435,6 +437,8 @@ def _legacy_validate(sig: ParsedSignal, metrics: Dict[str, Any]) -> ValidationRe
     
     price = _f(metrics.get("price"))
     _set_active_entry(sig, price)
+    if "MALFORMED_PROVIDER_LEVELS" in getattr(sig, "level_anomalies", []):
+        hard_blocks.append("MALFORMED_PROVIDER_LEVELS: provider supplied no usable TP or SL")
     
     # Hard block: no price data
     if price <= 0:

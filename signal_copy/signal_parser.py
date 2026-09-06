@@ -311,10 +311,17 @@ def _extract_take_profits(text: str) -> List[float]:
             r"\bTP\s*\d{1,2}\b\s*[:\-–—]*", "", line_for_numbers, flags=re.IGNORECASE
         )
         nums = []
-        for nm in _NUMBER_RE.finditer(line_for_numbers):
-            v = _to_float(nm.group(1))
-            if v is not None:
-                nums.append(v)
+        # Compact TP ladders use commas as delimiters ("TP 3400,3300,3200").
+        # Two or more commas are unambiguous here; one comma may be thousands/decimal.
+        value_text = line_for_numbers[m.end():]
+        compact = [part.strip() for part in value_text.split(",")]
+        if len(compact) >= 3 and all(re.fullmatch(r"\$?\d+(?:\.\d+)?", part) for part in compact):
+            nums = [_to_float(part) for part in compact]
+        else:
+            for nm in _NUMBER_RE.finditer(line_for_numbers):
+                v = _to_float(nm.group(1))
+                if v is not None:
+                    nums.append(v)
         if not nums:
             continue
         if m.group(1):  # label had an index like TP1 / TP 1

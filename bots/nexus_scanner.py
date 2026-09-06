@@ -25,13 +25,15 @@ import httpx
 
 NEXUS_API = os.getenv("NEXUS_API_URL", "http://localhost:8000")
 RUNTIME_DIR = Path(os.getenv("REVO_RUNTIME_DIR", "./runtime/revo"))
-TOP_N = int(os.getenv("REVO_TOP_N", "300"))
+TOP_N = int(os.getenv("REVO_TOP_N", "530"))
 MIN_VOLUME = float(os.getenv("REVO_MIN_VOLUME", "600000"))
 INTERVAL = int(os.getenv("REVO_SCANNER_INTERVAL", "300"))
+FRESH_KLINE_MAX_AGE_SEC = int(os.getenv("REVO_FRESH_KLINE_MAX_AGE_SEC", "900"))
+HTTP_TIMEOUT_SEC = int(os.getenv("REVO_SCANNER_HTTP_TIMEOUT_SEC", "120"))
 
 
 def fetch_json(client: httpx.Client, path: str, **params) -> dict:
-    r = client.get(f"{NEXUS_API}{path}", params=params, timeout=30)
+    r = client.get(f"{NEXUS_API}{path}", params=params, timeout=HTTP_TIMEOUT_SEC)
     r.raise_for_status()
     return r.json()
 
@@ -47,6 +49,51 @@ def ft_pair(symbol: str) -> str:
     if symbol.endswith("USDT"):
         return f"{symbol[:-4]}/USDT:USDT"
     return symbol
+
+
+def raw_symbol(pair: str) -> str:
+    p = str(pair).upper()
+    if "/" in p:
+        base = p.split("/", 1)[0]
+        quote = p.split("/", 1)[1].split(":", 1)[0]
+        return base + quote
+    return p.replace(":USDT", "")
+
+
+def has_fresh_kline(client: httpx.Client, symbol: str) -> bool:
+    """Fresh on either exchange. Keeps pairlist from carrying stale zombie rows."""
+    now = datetime.now(timezone.utc)
+    for exchange in ("binance", "bybit"):
+        try:
+            data = fetch_json(client, f"/klines/{exchange}/{symbol}", tf="5m", limit=1)
+            rows = data.get("data") or []
+            if not rows:
+                continue
+            ts = rows[-1].get("open_time") or rows[-1].get("timestamp")
+            if not ts:
+                continue
+            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            if (now - dt).total_seconds() <= FRESH_KLINE_MAX_AGE_SEC:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def load_runtime_symbols(rt: Path, names: list[str]) -> list[str]:
+    out, seen = [], set()
+    for name in names:
+        path = rt / name
+        try:
+            lines = path.read_text().splitlines()
+        except Exception:
+            continue
+        for line in lines:
+            sym = raw_symbol(line.strip())
+            if sym and sym not in seen:
+                seen.add(sym)
+                out.append(sym)
+    return out
 
 
 def write_text(path: Path, text: str) -> None:
@@ -215,7 +262,8 @@ def run_cycle(client: httpx.Client) -> dict:
 
     # Step 3: Flow context for all universe pairs
     try:
-        flow_all = fetch_json(client, "/flow/all", limit=TOP_N)
+        flow_all = fetch_json(client, "/flow/all", exchange="bybit",
+                              max_age_sec=FRESH_KLINE_MAX_AGE_SEC)
         raw_flow = flow_all.get("pairs", {})
         revo_flow = {}
         for symbol, rec in raw_flow.items():
@@ -235,19 +283,19 @@ def run_cycle(client: httpx.Client) -> dict:
         flow_keys = set(revo_flow.keys())
         if flow_keys:
             ranked = [ft_pair(p["pair"]) for p in pairs]
-            ranked_covered = [p for p in ranked if p in flow_keys]
-            seen = set(ranked_covered)
-            remaining = [k for k in revo_flow.keys() if k not in seen]
-            ft_pairs = (ranked_covered + remaining)[:TOP_N]
+            runtime_pairs = [ft_pair(s) for s in load_runtime_symbols(rt, ["binance_top100.txt", "bybit_all_691.txt"])]
+            seen = set(ranked)
+            candidates = ranked + [p for p in runtime_pairs if p not in seen]
+            ft_pairs = [p for p in candidates if has_fresh_kline(client, raw_symbol(p))]
             ft_out = {"pairs": ft_pairs}
-            # Keep every published universe artifact aligned with the real-flow
-            # pairlist. Step 2 may return fewer ranked movers than TOP_N, while
-            # /flow/all can still provide the full Bybit∩Binance flow universe.
+            # Keep published universe artifacts fresh-only. Flow may cover fewer
+            # pairs than OHLCV; pairlist freshness is based on 5m klines from
+            # Binance or Bybit, not only flow coverage.
             remote = {"pairs": [
                 {
                     "pair": pair,
-                    "symbol": revo_flow[pair].get("symbol", pair.replace("/USDT:USDT", "USDT").replace("/", "")),
-                    "quote_volume": revo_flow[pair].get("qvol_5m", 0),
+                    "symbol": raw_symbol(pair),
+                    "quote_volume": revo_flow.get(pair, {}).get("qvol_5m", 0),
                     "price_change_pct": None,
                 }
                 for pair in ft_pairs
@@ -261,8 +309,8 @@ def run_cycle(client: httpx.Client) -> dict:
             write_csv(rt / "pair_universe_top100.csv", remote["pairs"][:100])
             write_json(rt / "pair_universe_freqtrade.json", ft_out)
             write_json(rt / "freqtrade_pairlist.json", ft_out)
-            print(f"[nexus-scanner] Pairlist flow-anchored: {len(ft_pairs)} pairs "
-                  f"(all with real flow, 0 proxy)")
+            print(f"[nexus-scanner] Pairlist fresh-5m: {len(ft_pairs)} pairs "
+                  f"(stale/missing excluded)")
         # Audit-friendly raw collector dumps.
         write_json(rt / "revo_flow_context_collector.json", revo_flow)
         write_csv(rt / "revo_flow_context_collector.csv", list(revo_flow.values()))

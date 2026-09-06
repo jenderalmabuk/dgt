@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 
+from execution import paper_mainnet_trader
 from execution.paper_mainnet_trader import PaperMainnetTrader
 
 
@@ -21,8 +22,10 @@ def position():
     }
 
 
-def test_each_tp_closes_equal_slice_and_keeps_position_until_last():
-    t = Trader(); t.positions["NEOUSDT"] = position()
+def test_each_tp_closes_equal_slice_and_keeps_position_until_last(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_mainnet_trader, "PAPER_STATE_PATH", tmp_path / "positions.json")
+    monkeypatch.setattr(paper_mainnet_trader, "SHADOW_TRAILING_PATH", tmp_path / "shadow.jsonl")
+    t = Trader(); t.positions = {"NEOUSDT": position()}
     asyncio.run(t._apply_take_profits("NEOUSDT", 2.050))
     assert round(t.positions["NEOUSDT"]["qty"], 8) == 80.0
     assert t.positions["NEOUSDT"]["next_tp_index"] == 1

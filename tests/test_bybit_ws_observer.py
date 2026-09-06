@@ -23,15 +23,24 @@ class BybitObserverTest(unittest.TestCase):
         self.assertEqual(event["symbol"], "BTCUSDT")
         self.assertTrue(event["closed"])
 
+    def test_closed_h4_kline_reports_timeframe(self):
+        msg = {"topic": "kline.240.BTCUSDT", "data": [{"start": 1000, "confirm": True}]}
+        self.assertEqual(parse_kline(msg)["timeframe"], "4h")
+
+    def test_closed_m15_kline_reports_timeframe(self):
+        msg = {"topic": "kline.15.BTCUSDT", "data": [{"start": 1000, "confirm": True}]}
+        self.assertEqual(parse_kline(msg)["timeframe"], "15m")
+
     def test_forming_kline_is_ignored(self):
         msg = {"topic": "kline.15.BTCUSDT", "data": [{"start": 1000, "confirm": False}]}
         self.assertIsNone(parse_kline(msg))
 
     def test_duplicate_candle_emits_once(self):
         d = ClosedCandleDeduper()
-        self.assertTrue(d.accept("BTCUSDT", 1000))
-        self.assertFalse(d.accept("BTCUSDT", 1000))
-        self.assertTrue(d.accept("BTCUSDT", 1900))
+        self.assertTrue(d.accept("BTCUSDT", 1000, "15m"))
+        self.assertFalse(d.accept("BTCUSDT", 1000, "15m"))
+        self.assertTrue(d.accept("BTCUSDT", 1000, "4h"))
+        self.assertTrue(d.accept("BTCUSDT", 1900, "15m"))
 
     def test_reconnect_backoff_is_bounded(self):
         self.assertEqual([reconnect_delay(i) for i in range(6)], [1, 2, 4, 8, 16, 30])

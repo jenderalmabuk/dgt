@@ -1,111 +1,22 @@
 # Bot config — per-engine overrides
 # These map to engine CLI args
 
-# M30 Imbalance — legacy control, LLM OFF for gate A/B
-m30_imbalance:
+# Retired 2026-08-25 after failed paper edge triage:
+# m30_imbalance, h1_imbalance, h1_short_candidate, h1_short_volume2, h1_fusionnew.
+# Evidence: runtime/imbalance/retired_engines_20260825T041435Z.tar.gz
+
+# Retired 2026-08-30 by explicit user directive; only BTC-correlation engine remains.
+# Evidence: runtime/imbalance/retired_non_btc_corr_20260830T162949Z.tar.gz
+
+# Isolated paper candidate: baseline plus pair-specific BTC correlation only.
+m30_fusionnew_btc_corr:
   tier: M30
   direction: both
-  tag: _medium
+  symbols_file: runtime/revo/canonical_universe.txt
   ema_dist: 1.0
-  min_turn: 1000000
-  stoch_max: 70
-  equity: 1000
-  risk_pct: 0.01
-  max_positions: 6
-  leverage: 5
-  daily_loss_pct: 0.05
-  max_dd_pct: 0.20
-  interval_sec: 300
-  warm_batch: 40
-  cold_batch: 347
-  soft_pending_cap: 20
-  adversarial: false
-  cvd: false
-  btc_regime: false
-  symbols_file: ../runtime/revo/canonical_universe.txt
-
-# H1 Imbalance — control arm (both directions, preserves original state/history)
-h1_imbalance:
-  tier: H1
-  direction: both
-  tag: _h1_adversarial
-  ema_dist: 1.0
-  min_turn: 1000000
-  stoch_max: 70
-  equity: 1000
-  risk_pct: 0.01
-  max_positions: 6
-  leverage: 5
-  daily_loss_pct: 0.05
-  max_dd_pct: 0.20
-  interval_sec: 600
-  warm_batch: 40
-  cold_batch: 347
-  soft_pending_cap: 20
-  adversarial: false
-  cvd: false
-  btc_regime: false
-  symbols_file: ../runtime/revo/canonical_universe.txt
-
-# H1 short-only candidate — isolated forward-test treatment arm.
-# Same knobs as h1_imbalance; only direction and tag differ.
-h1_short_candidate:
-  tier: H1
-  direction: short
-  tag: _h1_short_candidate
-  ema_dist: 1.0
-  min_turn: 1000000
-  stoch_max: 70
-  equity: 1000
-  risk_pct: 0.01
-  max_positions: 6
-  leverage: 5
-  daily_loss_pct: 0.05
-  max_dd_pct: 0.20
-  interval_sec: 600
-  warm_batch: 40
-  cold_batch: 347
-  soft_pending_cap: 20
   adversarial: true
-  cvd: false
-  btc_regime: false
-  symbols_file: ../runtime/revo/canonical_universe.txt
-
-# ============================================================
-# FUSIONNEW forward-test bots — BEST STRATEGY (validated sweep 2026-07-14)
-# btc_regime+cvd ON (fix "short saat BTC up") + stoch_max 70 (freq recover, PF~3.9).
-# Isolated: separate STATE_DIR (runtime/fusionnew) + unique tag. dry/paper.
-# adversarial OFF = faithful to backtest (filter stack tested without LLM gate).
-# ============================================================
-h1_fusionnew:
-  tier: H1
-  direction: both
-  tag: _fusionnew_h1
-  ema_dist: 1.0
   min_turn: 1000000
-  stoch_max: 70
-  equity: 1000
-  risk_pct: 0.01
-  max_positions: 6
-  leverage: 5
-  daily_loss_pct: 0.05
-  max_dd_pct: 0.20
-  interval_sec: 600
-  warm_batch: 40
-  cold_batch: 347
-  soft_pending_cap: 20
-  adversarial: false
-  cvd: true
-  btc_regime: true
-  symbols_file: ../runtime/revo/canonical_universe.txt
-
-m30_fusionnew:
-  tier: M30
-  direction: both
-  tag: _fusionnew_m30
-  ema_dist: 1.0
-  min_turn: 1000000
-  stoch_max: 70
+  stoch_max: 0  # disabled 2026-09-02; user-approved density test
   equity: 1000
   risk_pct: 0.01
   max_positions: 6
@@ -116,7 +27,7 @@ m30_fusionnew:
   warm_batch: 40
   cold_batch: 347
   soft_pending_cap: 20
-  adversarial: false
   cvd: true
   btc_regime: true
+  btc_corr: true
   symbols_file: ../runtime/revo/canonical_universe.txt

@@ -5,8 +5,9 @@ CVD/BTC-strong/EMA/current-liquidity/stoch, finite max age, per-tier SL floor.
 A setup is decided at `end`; fill search starts strictly at end+1.
 """
 from __future__ import annotations
-import sys, json, statistics
+import argparse, sys, json, statistics
 from collections import defaultdict
+from pathlib import Path
 sys.path.insert(0, "/app")
 sys.path.insert(0, "/app/fusionnew")
 
@@ -18,13 +19,19 @@ from backtest.faithful_imbalance import (
     nearest_unmitigated_setups, _manage_exit, _atr,
 )
 
-DAYS = int(sys.argv[1]) if len(sys.argv)>1 else 60
-TIER = sys.argv[2] if len(sys.argv)>2 else "H1"
-MODE = sys.argv[3] if len(sys.argv)>3 else "full"  # raw|structural|full
-# XRP cache was empty in the deployed M30 container; exclude it from BOTH tiers/arms
-# so coverage remains identical and valid instead of silently accepting partial results.
-PAIRS = ["BTCUSDT","ETHUSDT","SOLUSDT","LINKUSDT","AVAXUSDT","DOGEUSDT",
-         "ADAUSDT","BNBUSDT","LTCUSDT","NEARUSDT","APTUSDT"]
+parser = argparse.ArgumentParser()
+parser.add_argument("days", type=int, nargs="?", default=60)
+parser.add_argument("tier", nargs="?", default="H1", choices=("H1", "M30"))
+parser.add_argument("mode", nargs="?", default="full", choices=("raw", "structural", "full"))
+parser.add_argument("--pairs-file")
+parser.add_argument("--direction", choices=("both", "long", "short"), default="both")
+parser.add_argument("--out")
+ARGS = parser.parse_args()
+DAYS, TIER, MODE = ARGS.days, ARGS.tier, ARGS.mode
+PAIRS = ([x.strip() for x in Path(ARGS.pairs_file).read_text().splitlines() if x.strip()]
+         if ARGS.pairs_file else
+         ["BTCUSDT", "ETHUSDT", "SOLUSDT", "LINKUSDT", "AVAXUSDT", "DOGEUSDT",
+          "ADAUSDT", "BNBUSDT", "LTCUSDT", "NEARUSDT", "APTUSDT"])
 ZONE_WIN, LTF_WIN = 300, 1000
 SETTINGS = {
     "H1": dict(step=12, floor=1.0, age=288),
@@ -76,7 +83,9 @@ def run_symbol(sym):
         if min(len(zcut),len(bcut))<260: continue
         trend=_trend(zcut); btc_trend=_trend(bcut)
         candidates=[]
-        for side in ("BULL","BEAR"):
+        sides = (("BULL",) if ARGS.direction == "long" else
+                 ("BEAR",) if ARGS.direction == "short" else ("BULL", "BEAR"))
+        for side in sides:
             ss=nearest_unmitigated_setups(zcut,lcut,trend,side,RR,max_age=st["age"],
                                            sl_floor_pct=st["floor"])
             funnel["raw"]+=len(ss)
@@ -112,7 +121,7 @@ def run_symbol(sym):
 
 def main():
     alltr=[]; agg=defaultdict(int); errors=[]
-    print(f"RUN tier={TIER} mode={MODE} days={DAYS} pairs={len(PAIRS)} settings={SETTINGS[TIER]}",flush=True)
+    print(f"RUN tier={TIER} mode={MODE} direction={ARGS.direction} days={DAYS} pairs={len(PAIRS)} settings={SETTINGS[TIER]}",flush=True)
     for sym in PAIRS:
         try: tr,fu=run_symbol(sym)
         except Exception as e: errors.append(f"{sym}:{type(e).__name__}:{e}"); print("ERR",errors[-1],flush=True); continue
@@ -120,15 +129,21 @@ def main():
         for k,v in fu.items(): agg[k]+=v
         print(f"  {sym:10} trades={len(tr):3d} raw={fu.get('raw',0):4d} fills={fu.get('fills',0):3d}",flush=True)
     m=metric(alltr); folds=fold_report(alltr)
+    ordered=sorted(alltr,key=lambda x:x["time"]); cut=max(1,int(len(ordered)*0.6)) if ordered else 0
+    is_metric=metric(ordered[:cut]); oos_metric=metric(ordered[cut:])
     print("FUNNEL",dict(agg)); print("ALL",m)
+    print("IS60",is_metric); print("OOS40",oos_metric)
     for i,x in enumerate(folds,1): print(f"FOLD{i}",x)
     sides=defaultdict(list)
     for t in alltr:sides[t["side"]].append(t)
     for k,v in sides.items():print("SIDE",k,metric(v))
     valid=len(errors)==0 and agg["raw"]>0
     print("VALID",valid,"ERRORS",errors)
-    out=dict(tier=TIER,mode=MODE,days=DAYS,metric=m,folds=folds,funnel=dict(agg),errors=errors,trades=alltr)
-    json.dump(out,open(f"/tmp/wf_{TIER}_{MODE}.json","w"),indent=2,default=str)
+    out=dict(tier=TIER,mode=MODE,direction=ARGS.direction,days=DAYS,pairs=PAIRS,
+             metric=m,is60=is_metric,oos40=oos_metric,folds=folds,
+             funnel=dict(agg),errors=errors,trades=alltr)
+    out_path=ARGS.out or f"/tmp/wf_{TIER}_{MODE}_{ARGS.direction}.json"
+    json.dump(out,open(out_path,"w"),indent=2,default=str)
     if not valid: raise SystemExit(2)
 
 if __name__=="__main__": main()

@@ -49,6 +49,7 @@ from datetime import datetime, timedelta, timezone
 # ---------------- config ----------------
 BOT = os.getenv("WHALE_REPORT_BOT_TOKEN", "")
 CHAT = os.getenv("WHALE_REPORT_CHAT_ID", "")
+DISCORD_WEBHOOK = os.getenv("WHALE_REPORT_DISCORD_WEBHOOK", "")
 ENABLED = os.getenv("WHALE_REPORT_ENABLED", "true").lower() == "true"
 REPORT_INTERVAL = int(os.getenv("WHALE_REPORT_INTERVAL", "1800"))
 ALERT_USD = float(os.getenv("WHALE_REPORT_ALERT_USD", "1000000"))
@@ -128,6 +129,35 @@ def tg(text):
         return False
 
 
+def discord(text):
+    """Send to Discord webhook. Convert HTML to plain Markdown."""
+    if not DISCORD_WEBHOOK:
+        return False
+    # Strip HTML tags: <b>x</b> → **x**, <i>x</i> → *x*, <a href=...>x</a> → [x](url)
+    import re
+    text = re.sub(r'<b>(.*?)</b>', r'**\1**', text)
+    text = re.sub(r'<i>(.*?)</i>', r'*\1*', text)
+    text = re.sub(r'<a href="(.*?)">(.*?)</a>', r'[\2](\1)', text)
+    text = html.unescape(text)  # &lt; → <
+    
+    payload = json.dumps({"content": text[:2000]}).encode()  # Discord limit 2000 char
+    try:
+        req = urllib.request.Request(DISCORD_WEBHOOK, data=payload,
+                                     headers={"Content-Type": "application/json", "User-Agent": "whale-report/1.0"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status == 204
+    except Exception as e:
+        log(f"discord send failed: {e}")
+        return False
+
+
+def notify(text):
+    """Send to all enabled destinations."""
+    tg_ok = tg(text) if BOT and CHAT else None
+    dc_ok = discord(text) if DISCORD_WEBHOOK else None
+    return tg_ok or dc_ok
+
+
 def classify(e):
     """Return (emoji, label, note) from event bias."""
     b = e.get("bias", "NEUTRAL")
@@ -165,6 +195,18 @@ def read_window(seconds):
             if t and t >= cutoff:
                 out.append(e)
     return out
+
+
+def scanner_health():
+    """Return health and age; stale scanner must never look like quiet market."""
+    path = os.path.join(RUNTIME, "whalescanner_health.json")
+    try:
+        with open(path) as fh:
+            health = json.load(fh)
+        age = time.time() - parse_ts(health.get("timestamp", ""))
+        return health, age
+    except Exception:
+        return None, None
 
 
 # ---------------- instant alerts (tail) ----------------
@@ -239,18 +281,23 @@ def send_alert(e):
     ]
     if link:
         lines.append(f'🔗 <a href="{link}">lihat tx</a>')
-    tg("\n".join(lines))
+    notify("\n".join(lines))
     log(f"ALERT {label} {sym} {fmt_usd(v)} ({chain})")
 
 
 # ---------------- periodic report ----------------
 def build_report():
+    health, health_age = scanner_health()
     events = [e for e in read_window(REPORT_INTERVAL)
               if float(e.get("value_usd", 0) or 0) >= REPORT_MIN]
     now = datetime.now(WIB)
     start = now - timedelta(seconds=REPORT_INTERVAL)
     hdr = (f"🐋 <b>WHALE FLOW REPORT</b> · {REPORT_INTERVAL // 60} menit\n"
            f"🕐 {start.strftime('%H:%M')}–{now.strftime('%H:%M')} WIB")
+    if not health or health_age is None or health_age > max(120, POLL * 4):
+        age_text = "tidak tersedia" if health_age is None else f"{health_age / 60:.0f} menit"
+        return (hdr + "\n\n🚨 <b>SCANNER OFFLINE / STALE</b>\n"
+                f"Health terakhir: {age_text} lalu. Data window tidak dapat dipercaya.")
     if not events:
         return hdr + "\n\n😴 Tidak ada aktivitas whale signifikan pada window ini."
 
@@ -304,14 +351,14 @@ def main():
         return
 
     if "--test" in sys.argv:
-        ok = tg(build_report())
+        ok = notify(build_report())
         log(f"test report sent ok={ok}")
         return
 
     log(f"start · runtime={RUNTIME} · report/{REPORT_INTERVAL}s · "
         f"alert≥{fmt_usd(ALERT_USD)} · mega≥{fmt_usd(MEGA_USD)}")
     seed_offsets()
-    tg("🐋 <b>Whale reporter aktif</b>\n"
+    notify("🐋 <b>Whale reporter aktif</b>\n"
        f"Report tiap {REPORT_INTERVAL // 60} menit · "
        f"alert instan ≥ {fmt_usd(ALERT_USD)} (mega ≥ {fmt_usd(MEGA_USD)})")
     last_report = time.time()
@@ -319,7 +366,7 @@ def main():
         try:
             poll_alerts()
             if time.time() - last_report >= REPORT_INTERVAL:
-                tg(build_report())
+                notify(build_report())
                 last_report = time.time()
                 log("periodic report sent")
         except Exception as e:

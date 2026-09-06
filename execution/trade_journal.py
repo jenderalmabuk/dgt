@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -1068,6 +1069,24 @@ def _normalize_trade_record(row: Dict[str, Any]) -> Dict[str, Any]:
         "h1_location_notes": normalized["h1_location_notes"],
     }
 
+    # --- surface signal-copy audit fields to root for easy querying ---
+    adv = trade.get("adv_snapshot") or {}
+    for k in (
+        "signal_source",
+        "source_chat_id",
+        "signal_id",
+        "signal_entry_low",
+        "signal_entry_high",
+        "signal_active_entry",
+        "signal_entry_type",
+        "signal_timeframe",
+        "signal_leverage",
+        "signal_tp_ladder",
+        "signal_raw_text",
+    ):
+        if adv.get(k) is not None:
+            normalized[k] = adv[k]
+
     return normalized
 
 
@@ -1218,7 +1237,17 @@ class TradeJournalWriter:
         history = load_json(path, default=[])
         if not isinstance(history, list):
             history = []
-        history.append(dict(normalized))
+
+        def json_safe(value: Any) -> Any:
+            if isinstance(value, datetime):
+                return value.isoformat()
+            if isinstance(value, dict):
+                return {key: json_safe(item) for key, item in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [json_safe(item) for item in value]
+            return value
+
+        history.append(json_safe(normalized))
         if len(history) > MAX_HISTORY_ROWS:
             history = history[-MAX_HISTORY_ROWS:]
         atomic_write_json(path, history)

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 from utils.logger import logger
 
-DB_FILE = "data/channel_performance.json"
+DB_FILE = os.getenv("SIGNAL_COPY_CHANNEL_PERFORMANCE_STORE", "data/channel_performance.json")
 
 class ChannelPerformanceTracker:
     def __init__(self):
@@ -15,15 +15,20 @@ class ChannelPerformanceTracker:
         p = Path(DB_FILE)
         if p.exists():
             try:
-                self.data = json.loads(p.read_text())
-            except:
+                raw = p.read_text().strip()
+                self.data = json.loads(raw) if raw else {}
+            except (OSError, json.JSONDecodeError):
                 self.data = {}
         else:
             self.data = {}
     
     def _save(self):
         try:
-            Path(DB_FILE).write_text(json.dumps(self.data, indent=2))
+            path = Path(DB_FILE)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(self.data, indent=2))
+            tmp.replace(path)
         except Exception as e:
             logger.warning(f"[CH_PERF] Save failed: {e}")
 
@@ -89,6 +94,14 @@ class ChannelPerformanceTracker:
 
     def get_reputation_score(self, source_chat_id: int) -> float:
         """Calculate a reputation score (0-100) for validation weighting."""
+        # Channel-specific overrides (pilot channels, high-frequency scalping, etc.)
+        CHANNEL_SCORE_OVERRIDES = {
+            -1001652601224: 80.0,  # Pilot scalping channel: stricter threshold
+        }
+
+        if source_chat_id in CHANNEL_SCORE_OVERRIDES:
+            return CHANNEL_SCORE_OVERRIDES[source_chat_id]
+
         stats = self.get_channel_stats(source_chat_id)
         
         if stats["signals"] < 3:

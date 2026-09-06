@@ -43,29 +43,27 @@ def test_short_below_zone_even_past_tp1_waits_for_retest():
     assert decision.passed_targets == [2.057]
 
 
-def test_short_profit_drift_at_point_one_r_routes_late_market():
-    # Lower boundary risk distance: 2.21276 - 2.068 = 0.14476.
+def test_short_profit_drift_at_point_one_r_stays_pending():
     decision = route_entry(neo(), 2.068 - 0.1 * 0.14476)
-    assert decision.action == EntryAction.MARKET
-    assert decision.code == "MARKET_LATE_ENTRY_0_10R"
+    assert decision.action == EntryAction.LIMIT
+    assert decision.code == "PRICE_OUTSIDE_ENTRY_ZONE"
 
 
-def test_short_toward_stop_drift_at_point_one_r_routes_late_market():
-    # Upper boundary risk distance: 2.21276 - 2.130 = 0.08276.
+def test_short_toward_stop_drift_at_point_one_r_stays_pending():
     decision = route_entry(neo(), 2.130 + 0.1 * 0.08276)
-    assert decision.action == EntryAction.MARKET
-    assert decision.code == "MARKET_LATE_ENTRY_0_10R"
+    assert decision.action == EntryAction.LIMIT
+    assert decision.code == "PRICE_OUTSIDE_ENTRY_ZONE"
 
 
-def test_long_profit_drift_at_point_one_r_routes_late_market():
+def test_long_profit_drift_at_point_one_r_stays_pending():
     sig = ParsedSignal(
         symbol="TESTUSDT", side=SignalSide.LONG,
         entry_low=100, entry_high=110, stop_loss=90,
         take_profits=[112, 130], leverage=10,
     )
     decision = route_entry(sig, 112)
-    assert decision.action == EntryAction.MARKET
-    assert decision.code == "MARKET_LATE_ENTRY_0_10R"
+    assert decision.action == EntryAction.LIMIT
+    assert decision.code == "PRICE_OUTSIDE_ENTRY_ZONE"
 
 
 def test_long_outside_beyond_point_one_r_stays_pending():
@@ -134,3 +132,14 @@ def test_rr_ladder_uses_candidate_fill_not_old_midpoint():
     decision = route_entry(neo(), 2.100)
     assert round(decision.rr_by_target[0], 2) == 0.38
     assert round(decision.rr_by_target[2], 2) == 1.49
+
+
+def test_extreme_provider_entry_scale_mismatch_has_explicit_reason():
+    sig = ParsedSignal(
+        symbol="SANDUSDT", side=SignalSide.LONG,
+        entry_low=0.3299, entry_high=0.3299,
+        stop_loss=0.3266, take_profits=[0.3332, 0.3365],
+    )
+    decision = route_entry(sig, 0.04179)
+    assert decision.action == EntryAction.REJECT
+    assert decision.code == "ENTRY_PRICE_SCALE_MISMATCH"

@@ -110,9 +110,9 @@ def mss_confirm(ltf, zone, side, start, end):
         prior = ltf.iloc[start:i]
         swept = (float(prior.low.min()) < ll[2]) if side == "BULL" else (float(prior.high.max()) > lh[2])
         if side == "BULL" and swept and float(ltf.close.iloc[i]) > lh[2]:
-            return {"i":i,"sweep":float(prior.low.min()),"disp":float(ltf.high.iloc[i]),"side":side}
+            return {"i":i,"sweep":float(prior.low.min()),"disp":float(ltf.high.iloc[i]),"side":side,"pivot_high":lh[2],"pivot_low":ll[2]}
         if side == "BEAR" and swept and float(ltf.close.iloc[i]) < ll[2]:
-            return {"i":i,"sweep":float(prior.high.max()),"disp":float(ltf.low.iloc[i]),"side":side}
+            return {"i":i,"sweep":float(prior.high.max()),"disp":float(ltf.low.iloc[i]),"side":side,"pivot_high":lh[2],"pivot_low":ll[2]}
     return None
 
 

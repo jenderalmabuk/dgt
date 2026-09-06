@@ -41,6 +41,9 @@ class ExecutionOutcome:
     rr_tp1: float = 0.0
     rr_full: float = 0.0
     raw: Optional[Dict[str, Any]] = None
+    execution_intended: bool = False
+    gateway_accepted: bool = False
+    position_confirmed: bool = False
 
 
 class SignalExecutor:
@@ -194,6 +197,7 @@ class SignalExecutor:
             ok=False, reason="", symbol=sig.symbol, side=sig.side.value,
             entry_price=entry_price, notional=notional, sl_price=sl_price,
             tp1=tp1, tp_full=tp_full, risk_amount=risk_amount,
+            execution_intended=True,
         )
 
         if dry_run:
@@ -224,7 +228,20 @@ class SignalExecutor:
             outcome.reason = f"submit_open error: {exc}"
             return outcome
 
-        if not opened or (isinstance(opened, dict) and opened.get("ok") is False):
+        accepted = isinstance(opened, dict) and (
+            opened.get("ok") is True or opened.get("success") is True
+        )
+        confirmed = accepted and (
+            opened.get("position_confirmed") is True
+            or (
+                float(opened.get("notional") or 0.0) > 0
+                and float(opened.get("entry_price") or 0.0) > 0
+            )
+        )
+        outcome.gateway_accepted = accepted
+        outcome.position_confirmed = confirmed
+        if not confirmed:
+            outcome.raw = opened if isinstance(opened, dict) else {"result": opened}
             try:
                 await self.risk_mgr.release_open_risk(sig.symbol)
             except Exception:
@@ -234,7 +251,7 @@ class SignalExecutor:
             elif isinstance(opened, dict) and opened.get("error"):
                 outcome.reason = str(opened["error"])
             else:
-                outcome.reason = "trader rejected open: no position created"
+                outcome.reason = "gateway response did not confirm position"
             logger.warning("[SIGNAL_EXEC] %s %s: %s", sig.symbol, sig.side.value, outcome.reason)
             return outcome
 

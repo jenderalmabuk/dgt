@@ -10,6 +10,7 @@ file passes a few hundred MB or when a query layer is needed.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from typing import Any
 
 JOURNAL_PATH = Path(os.getenv("SIGNAL_COPY_PENDING_JOURNAL",
                               "runtime/signal_copy/pending_lifecycle.jsonl"))
+logger = logging.getLogger(__name__)
 
 
 def signal_from_row(row: dict):
@@ -58,10 +60,14 @@ def load_latest_pending() -> list[dict]:
         latest: dict[str, dict] = {}
         if not JOURNAL_PATH.exists():
             return []
-        for line in JOURNAL_PATH.read_text().splitlines():
+        for line_number, line in enumerate(JOURNAL_PATH.read_text().splitlines(), 1):
             if not line.strip():
                 continue
-            row = json.loads(line)
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                logger.warning("Skipping corrupt pending journal line %d: %s", line_number, exc)
+                continue
             signal_id = str(row.get("signal_id") or "")
             if signal_id:
                 latest[signal_id] = row
@@ -96,5 +102,16 @@ def record(event: str, sig: Any, **fields) -> None:
         JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
         with JOURNAL_PATH.open("a") as fh:
             fh.write(json.dumps(row, default=str) + "\n")
+        from . import signal_lifecycle
+        gateway_accepted = bool(fields.get("gateway_accepted", event == "FILLED"))
+        position_confirmed = bool(fields.get("position_confirmed", event == "FILLED"))
+        stage = "POSITION_CONFIRMED" if position_confirmed else event
+        signal_lifecycle.record(
+            row["signal_id"], stage, symbol=row["symbol"], side=row["side"],
+            gateway_accepted=gateway_accepted or position_confirmed,
+            position_confirmed=position_confirmed,
+            reason=fields.get("reason", ""),
+            gateway_response=fields.get("gateway_response"),
+        )
     except Exception:
         pass

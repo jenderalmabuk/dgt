@@ -45,6 +45,10 @@ class RiskManager:
         self.max_drawdown_pct = float(MAX_DRAWDOWN_PCT)
         self.max_daily_loss_pct = float(MAX_DAILY_LOSS_PCT)
         self.max_total_exposure_pct = float(MAX_TOTAL_EXPOSURE_PCT)
+        paper_mode = os.getenv("GATEWAY_PAPER_MAINNET", "true").lower() in ("1", "true", "yes")
+        self.ignore_max_drawdown_for_sample = paper_mode and os.getenv(
+            "PAPER_SAMPLE_IGNORE_MAX_DRAWDOWN", "false"
+        ).lower() in ("1", "true", "yes")
 
         self.last_trade_time = None
         self.last_trade_time_per_symbol = {}
@@ -63,6 +67,7 @@ class RiskManager:
         self.cooldown_symbol_min = float(COOLDOWN_SYMBOL_MIN)
 
         self.trading_enabled = True
+        self.trading_disable_reason = ""
         self.trader = None
         self.daily_loss_hit = False
         self.temp_pause_until = None
@@ -74,7 +79,6 @@ class RiskManager:
         self.vip_risk_budget_pct = 0.15
         self.vip_risk_used = 0.0
 
-        paper_mode = os.getenv("GATEWAY_PAPER_MAINNET", "true").lower() in ("1", "true", "yes")
         default_global_risk = 0.20 if paper_mode else 0.05
         self.parallel_open_risk_budget_pct = float(
             os.getenv("MAX_GLOBAL_OPEN_RISK_PCT", str(default_global_risk))
@@ -96,6 +100,9 @@ class RiskManager:
     def _reset_daily_if_needed(self) -> None:
         today = datetime.now(UTC).date()
         if today != self.last_daily_reset:
+            if self.trading_disable_reason in ("DAILY_LOSS", "HARD_DAILY_STOP"):
+                self.trading_enabled = True
+                self.trading_disable_reason = ""
             self.daily_start_balance = self.current_equity
             self.daily_pnl = 0.0
             self.daily_loss_hit = False
@@ -201,7 +208,7 @@ class RiskManager:
         return max(0.0, float(self.current_equity) * float(self.parallel_open_risk_budget_pct))
 
     def get_active_open_risk_total(self) -> float:
-        """Remaining gross loss to active provider stops, using actual fills/qty."""
+        """Remaining economic loss to active stops, including fees and exit slip."""
         total = 0.0
         for pos in self._iter_trader_positions():
             entry = self._safe_float(self._position_attr(pos, "entry_price", 0.0))
@@ -210,7 +217,10 @@ class RiskManager:
             side = str(self._position_attr(pos, "side", "") or "").upper()
             valid_stop = (side == "LONG" and 0 < stop < entry) or (side == "SHORT" and stop > entry)
             if entry > 0 and qty > 0 and valid_stop:
-                total += abs(entry - stop) * qty
+                fee = max(0.0, float(os.getenv("PAPER_TAKER_FEE_PCT", "0.0005")))
+                slip = max(0.0, float(os.getenv("PAPER_SLIPPAGE_PCT", "0.0005")))
+                exit_fill = stop * (1.0 - slip if side == "LONG" else 1.0 + slip)
+                total += abs(entry - exit_fill) * qty + entry * qty * fee + exit_fill * qty * fee
         return total
 
     def get_total_open_risk(self) -> float:
@@ -223,24 +233,42 @@ class RiskManager:
         default = "30" if paper else "20"
         return max(1, int(os.getenv(key, os.getenv("FQ_MAX_RUNNING_POSITIONS", default))))
 
-    async def reserve_open_risk(self, symbol: str, risk_amount: float) -> bool:
+    async def reserve_open_risk_details(self, symbol: str, risk_amount: float) -> Dict[str, Any]:
         symbol_u = str(symbol or "").upper()
         risk_amount = max(0.0, float(risk_amount or 0.0))
-        if not symbol_u or risk_amount <= 0.0:
-            return False
         async with self._risk_lock:
             self._clear_stale_open_risk_reservations()
-            if symbol_u in self._reserved_open_risk or symbol_u in self._position_symbols():
-                return False
+            active = self.get_active_open_risk_total()
+            reserved_risk = self.get_reserved_risk_total()
+            positions = self._position_count()
+            reservations = len(self._reserved_open_risk)
+            budget = self.get_parallel_open_risk_budget()
+            max_running = self.get_max_running_positions()
+            detail = {"symbol": symbol_u, "requested_risk": risk_amount,
+                      "active_open_risk": active, "reserved_open_risk": reserved_risk,
+                      "total_open_risk": active + reserved_risk, "risk_budget": budget,
+                      "risk_budget_remaining": max(0.0, budget - active - reserved_risk),
+                      "open_positions": positions, "inflight_reservations": reservations,
+                      "max_running_positions": max_running}
+            if not symbol_u:
+                return {**detail, "reserved": False, "code": "INVALID_SYMBOL"}
+            if risk_amount <= 0:
+                return {**detail, "reserved": False, "code": "INVALID_RISK_AMOUNT"}
+            if symbol_u in self._reserved_open_risk:
+                return {**detail, "reserved": False, "code": "SYMBOL_ALREADY_RESERVED"}
+            if symbol_u in self._position_symbols():
+                return {**detail, "reserved": False, "code": "POSITION_ALREADY_OPEN"}
             # Reserve an in-flight running slot atomically with risk. Dormant
             # pending setups never call this and remain unlimited.
-            max_running = self.get_max_running_positions()
-            if self._position_count() + len(self._reserved_open_risk) >= max_running:
-                return False
-            if self.get_total_open_risk() + risk_amount > self.get_parallel_open_risk_budget():
-                return False
+            if positions + reservations >= max_running:
+                return {**detail, "reserved": False, "code": "RUNNING_SLOT_CAP"}
+            if active + reserved_risk + risk_amount > budget:
+                return {**detail, "reserved": False, "code": "OPEN_RISK_BUDGET"}
             self._reserved_open_risk[symbol_u] = ReservedRisk(symbol=symbol_u, amount=risk_amount, created_at=datetime.now(UTC))
-            return True
+            return {**detail, "reserved": True, "code": "RESERVED"}
+
+    async def reserve_open_risk(self, symbol: str, risk_amount: float) -> bool:
+        return bool((await self.reserve_open_risk_details(symbol, risk_amount))["reserved"])
 
     async def release_open_risk(self, symbol: str) -> None:
         symbol_u = str(symbol or "").upper()
@@ -265,6 +293,7 @@ class RiskManager:
             if not self.daily_loss_hit:
                 self.daily_loss_hit = True
                 self.trading_enabled = False
+                self.trading_disable_reason = "DAILY_LOSS"
             return True
         return False
 
@@ -304,7 +333,8 @@ class RiskManager:
             remaining = (self.temp_pause_until - datetime.now(UTC)).total_seconds() / 60.0
             return {"can_trade": False, "reason": f"Risk pause {remaining:.1f} min"}
         if not self.trading_enabled:
-            return {"can_trade": False, "reason": "Trading disabled"}
+            owner = self.trading_disable_reason or "UNKNOWN"
+            return {"can_trade": False, "reason": f"Trading disabled: {owner}"}
         if self.giveback_lock_until and datetime.now(UTC) < self.giveback_lock_until:
             remaining = (self.giveback_lock_until - datetime.now(UTC)).total_seconds() / 60.0
             return {"can_trade": False, "reason": f"Giveback guard active ({remaining:.1f} min)"}
@@ -332,8 +362,9 @@ class RiskManager:
             return {"can_trade": False, "reason": "Max open positions reached"}
 
         drawdown = self.get_current_drawdown()
-        if drawdown >= self.max_drawdown_pct:
+        if drawdown >= self.max_drawdown_pct and not self.ignore_max_drawdown_for_sample:
             self.trading_enabled = False
+            self.trading_disable_reason = "MAX_DRAWDOWN"
             return {"can_trade": False, "reason": "Max drawdown reached"}
         return {"can_trade": True, "reason": "OK"}
 
@@ -402,6 +433,7 @@ class RiskManager:
         if daily_loss_pct <= -0.018:
             self.hard_daily_stop_hit = True
             self.trading_enabled = False
+            self.trading_disable_reason = "HARD_DAILY_STOP"
 
     def compute_position_size(
         self,
@@ -563,8 +595,15 @@ class RiskManager:
             return 0.0
         return max(0.0, (self.peak_balance - equity_now) / self.peak_balance * 100.0)
 
-    def sync_balance(self, new_equity: float) -> None:
+    def sync_balance(self, new_equity: float, *, reset_daily_baseline: bool = False) -> None:
         self.current_equity = float(new_equity)
+        if reset_daily_baseline:
+            self.daily_start_balance = self.current_equity
+            self.daily_pnl = 0.0
+            self.daily_loss_hit = False
+            self.hard_daily_stop_hit = False
+            self.trading_enabled = True
+            self.trading_disable_reason = ""
         if self.current_equity > self.peak_balance:
             self.peak_balance = self.current_equity
         self._reset_daily_if_needed()

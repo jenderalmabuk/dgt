@@ -1,0 +1,228 @@
+{
+  "generated_at": "2026-08-07T09:34:12.145300+00:00",
+  "fresh_threshold_sec": 900,
+  "before_count": 691,
+  "fresh_count": 632,
+  "stale_count": 52,
+  "missing_count": 7,
+  "backup": "/home/fusion_omega/fusion_omega_nexus/runtime/revo/freqtrade_pairlist.before_fresh_filter_2026-08-07.json",
+  "stale": [
+    {
+      "symbol": "XPTUSDT",
+      "age_min": 38009.2
+    },
+    {
+      "symbol": "QNTXUSDT",
+      "age_min": 38004.2
+    },
+    {
+      "symbol": "RAYSOLUSDT",
+      "age_min": 38004.2
+    },
+    {
+      "symbol": "HOTUSDT",
+      "age_min": 20589.2
+    },
+    {
+      "symbol": "AERGOUSDT",
+      "age_min": 18754.2
+    },
+    {
+      "symbol": "1000000BOBUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "1000CHEEMSUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "1MBABYDOGEUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "AGTUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "AINUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "AIOTUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "ALLUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "BASUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "BEAMXUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "BROCCOLI714USDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "BROCCOLIF3BUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "BTCDOMUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "CELRUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "CTKUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "DATAIPUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "DOGSUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "ETHWUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "FRAXUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "GTCUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "JOEUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "LAYERUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "LISTAUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "ONEUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "PLAYUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "PUMPBTCUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "SFPUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "SOLVUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "SPELLUSDT",
+      "age_min": 1559.2
+    },
+    {
+      "symbol": "TURBOUSDT",
+      "age_min": 1524.2
+    },
+    {
+      "symbol": "1000SATSUSDT",
+      "age_min": 1519.2
+    },
+    {
+      "symbol": "AIAUSDT",
+      "age_min": 1519.2
+    },
+    {
+      "symbol": "BULLAUSDT",
+      "age_min": 1519.2
+    },
+    {
+      "symbol": "COLLECTUSDT",
+      "age_min": 1519.2
+    },
+    {
+      "symbol": "CTSIUSDT",
+      "age_min": 1519.2
+    },
+    {
+      "symbol": "GUAUSDT",
+      "age_min": 1519.2
+    },
+    {
+      "symbol": "GUSDT",
+      "age_min": 1519.2
+    },
+    {
+      "symbol": "IDOLUSDT",
+      "age_min": 1519.2
+    },
+    {
+      "symbol": "MANTRAUSDT",
+      "age_min": 1519.2
+    },
+    {
+      "symbol": "NEIROUSDT",
+      "age_min": 1519.2
+    },
+    {
+      "symbol": "PROMUSDT",
+      "age_min": 1519.2
+    },
+    {
+      "symbol": "STARUSDT",
+      "age_min": 1519.2
+    },
+    {
+      "symbol": "TSTUSDT",
+      "age_min": 1519.2
+    },
+    {
+      "symbol": "BTCUSDT-07AUG26",
+      "age_min": 94.2
+    },
+    {
+      "symbol": "DOGEUSDT-07AUG26",
+      "age_min": 94.2
+    },
+    {
+      "symbol": "ETHUSDT-07AUG26",
+      "age_min": 94.2
+    },
+    {
+      "symbol": "HYPEUSDT-07AUG26",
+      "age_min": 94.2
+    },
+    {
+      "symbol": "MNTUSDT-07AUG26",
+      "age_min": 94.2
+    }
+  ],
+  "missing": [
+    "SANTOSUSDT",
+    "SCRUSDT",
+    "SWARMSUSDT",
+    "TAGUSDT",
+    "TOSHIUSDT",
+    "TRADOORUSDT",
+    "VTHOUSDT"
+  ]
+}

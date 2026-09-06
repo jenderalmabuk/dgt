@@ -137,16 +137,22 @@ async def get_pairs(exchange: str):
 
 @app.get("/flow/all")
 async def get_all_flow(
-    exchange: str = Query("binance"),
-    limit: int = Query(300, ge=1, le=530),
+    exchange: str = Query("bybit"),
+    timeframe: str = Query("1m"),
+    max_age_sec: int = Query(900, ge=60, le=3600),
 ):
-    """Bulk flow context for all tracked symbols — matches Revo flow_context.json format."""
+    """Flow for every symbol with a fresh DB candle; no ranking/cap."""
     syms = await query(
-        "SELECT symbol FROM universe WHERE exchange=$1 AND active=TRUE ORDER BY symbol LIMIT $2",
-        exchange, limit,
+        """SELECT symbol
+           FROM klines
+           WHERE exchange=$1 AND timeframe=$2
+           GROUP BY symbol
+           HAVING MAX(open_time) >= NOW() - ($3 * INTERVAL '1 second')
+           ORDER BY symbol""",
+        exchange, timeframe, max_age_sec,
     )
     # Parallel flow computation, bounded to protect the DB pool.
-    sem = asyncio.Semaphore(8)
+    sem = asyncio.Semaphore(16)
 
     async def _bounded(sym: str):
         async with sem:
@@ -212,7 +218,7 @@ async def get_btc_regime(exchange: str = Query("binance")):
 @app.get("/universe/top")
 async def get_top_universe(
     exchange: str = Query("binance"),
-    n: int = Query(200, ge=1, le=530),
+    n: int = Query(200, ge=1, le=691),
     min_volume: float = Query(600_000),
     tf: str = Query("5m"),
     sort_by: str = Query("abs_change", pattern="abs_change|volume"),

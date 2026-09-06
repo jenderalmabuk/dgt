@@ -17,6 +17,7 @@ import json
 import os
 import time
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -53,6 +54,202 @@ except Exception:
 LTF_MIN = {"15m": 15, "5m": 5, "3m": 3}
 STATE_DIR = Path(os.getenv("STATE_DIR", str(Path(__file__).parent / "state")))
 STATE_FILE_TEMPLATE = "engine_state_{tier}_{direction}.json"
+
+
+def btc_corr_context(pair_close, btc_close, lookback: int = 20) -> Dict[str, Any]:
+    """Classify timestamp-aligned 15m return correlation; invalid data stays UNKNOWN."""
+    unavailable = {"corr": 0.0, "strength": "UNKNOWN", "weight": 0.5,
+                   "decoupled": False, "note": "BTC_CORR_UNAVAILABLE", "quality_ok": False}
+    try:
+        a, b = pd.Series(pair_close, dtype=float), pd.Series(btc_close, dtype=float)
+        if isinstance(pair_close, pd.Series) and isinstance(btc_close, pd.Series):
+            aligned = pd.concat([pair_close.rename("pair"), btc_close.rename("btc")], axis=1, join="inner").dropna()
+            a, b = aligned["pair"], aligned["btc"]
+        n = min(len(a), len(b), lookback + 1)
+        if n < lookback + 1:
+            return unavailable
+        ar, br = a.iloc[-n:].pct_change().dropna().to_numpy(), b.iloc[-n:].pct_change().dropna().to_numpy()
+        if not np.isfinite(ar).all() or not np.isfinite(br).all() or np.std(ar) <= 1e-12 or np.std(br) <= 1e-12:
+            return unavailable
+        corr = float(np.corrcoef(ar, br)[0, 1])
+        if corr >= 0.75:
+            strength, weight, decoupled, note = "HIGH", 1.0, False, "FOLLOWING_BTC"
+        elif corr >= 0.50:
+            strength, weight, decoupled, note = "MEDIUM", 0.7, False, "PARTIAL_DECOUPLE"
+        elif corr >= 0.30:
+            strength, weight, decoupled, note = "LOW", 0.4, False, "PARTIAL_DECOUPLE"
+        elif corr >= 0.0:
+            strength, weight, decoupled, note = "LOW", 0.15, True, "DECOUPLED"
+        else:
+            strength, weight, decoupled, note = "NEGATIVE", 0.1, True, "NEGATIVE_RELATION"
+        return {"corr": round(corr, 4), "strength": strength, "weight": weight,
+                "decoupled": decoupled, "note": note, "quality_ok": True}
+    except Exception:
+        return unavailable
+
+
+def btc_vwap15_regime(btc_15m: pd.DataFrame, buffer_pct: float = 0.0005,
+                      atr_mult: float = 0.10) -> Dict[str, Any]:
+    """Classify BTC 15m close versus rolling VWAP with small ATR buffer."""
+    rows = btc_15m if btc_15m is not None else pd.DataFrame()
+    if len(rows) < 14 or not {"high", "low", "close", "volume"}.issubset(rows.columns):
+        return {"regime": "unknown", "vwap": None, "dist_pct": None, "buffer_pct": None}
+    rows = rows.tail(20).copy()
+    close = rows["close"].astype(float)
+    vol = rows["volume"].astype(float).clip(lower=0)
+    denom = float(vol.sum())
+    if denom <= 0:
+        return {"regime": "unknown", "vwap": None, "dist_pct": None, "buffer_pct": None}
+    vwap = float((close * vol).sum() / denom)
+    prev = close.shift(1)
+    tr = pd.concat([(rows["high"].astype(float) - rows["low"].astype(float)),
+                    (rows["high"].astype(float) - prev).abs(),
+                    (rows["low"].astype(float) - prev).abs()], axis=1).max(axis=1)
+    atr_pct = float(tr.tail(14).mean() / close.iloc[-1]) if float(close.iloc[-1]) else 0.0
+    buf = max(float(buffer_pct), float(atr_mult) * atr_pct)
+    dist = float(close.iloc[-1] / vwap - 1.0) if vwap else 0.0
+    regime = "bull" if dist > buf else ("bear" if dist < -buf else "neutral")
+    return {"regime": regime, "vwap": vwap, "dist_pct": dist * 100.0, "buffer_pct": buf * 100.0}
+
+
+def btc_corr_allows(side: str, btc_regime: str, note: str, existing_btc_ok: bool) -> bool:
+    """VWAP-regime side gate: bull=BUY only, bear=SELL only, neutral=quality-gated both."""
+    if side == "BEAR" and btc_regime == "bull":
+        return False
+    if side == "BULL" and btc_regime == "bear":
+        return False
+    if note in ("BTC_CORR_UNAVAILABLE", "UNKNOWN"):
+        return existing_btc_ok and btc_regime == "neutral"
+    aligned = (side == "BULL" and btc_regime == "bull") or (side == "BEAR" and btc_regime == "bear")
+    if aligned and note in ("FOLLOWING_BTC", "PARTIAL_DECOUPLE"):
+        return True
+    if btc_regime == "neutral":
+        return existing_btc_ok and note in ("FOLLOWING_BTC", "PARTIAL_DECOUPLE", "DECOUPLED")
+    return False
+
+
+def dynamic_fib_expiry_bars(side: str, btc_regime: str, note: str, decoupled: bool,
+                            base_bars: int = FIB_EXPIRY, strong_bars: int = 24) -> tuple[int, str]:
+    aligned = (side == "BULL" and btc_regime == "bull") or (side == "BEAR" and btc_regime == "bear")
+    strong = aligned and not decoupled and note in ("FOLLOWING_BTC", "PARTIAL_DECOUPLE")
+    return (int(strong_bars), "strong_vwap_aligned") if strong else (int(base_bars), "base")
+
+
+def smart_exit_step(trade: Dict[str, Any], hi: float, lo: float, close: float,
+                    closed_m5: bool) -> tuple[float | None, str | None]:
+    """BUY-only closed-M5 giveback floor; evaluate prior floor before raising it."""
+    if trade.get("side") != "BUY" or not closed_m5:
+        return None, None
+    entry, sl = float(trade["entry"]), float(trade["sl"])
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return None, None
+    prior_floor = trade.get("smart_floor_r")
+    if prior_floor is not None and close <= entry + float(prior_floor) * risk:
+        reason = "SMART_EXIT_2R_GIVEBACK" if float(prior_floor) >= 1.0 else "SMART_EXIT_1R_GIVEBACK"
+        return min(float(close), entry + float(prior_floor) * risk), reason
+    close_r = (float(close) - entry) / risk
+    trade["smart_peak_r"] = max(float(trade.get("smart_peak_r", 0.0)), close_r)
+    if trade["smart_peak_r"] >= 2.0:
+        trade["smart_floor_r"] = 1.0
+    elif trade["smart_peak_r"] >= 1.0:
+        trade["smart_floor_r"] = 0.25
+    return None, None
+
+
+def journal_once(seen: set, event: str, symbol: str, side: str, setup_ts: Any) -> bool:
+    """Return true once per exact setup/event; caller persists ``seen``."""
+    key = (event, symbol, side, str(setup_ts))
+    if key in seen:
+        return False
+    seen.add(key)
+    return True
+
+
+def prune_journal_seen(seen: set, days: int = 7) -> set:
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
+    kept = set()
+    for key in seen:
+        try:
+            ts = pd.Timestamp(key[3])
+            ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+            if ts.to_pydatetime() >= cutoff:
+                kept.add(key)
+        except Exception:
+            kept.add(key)
+    return kept
+
+
+def unique_setups(setups):
+    """Deduplicate detector output before gates/journaling."""
+    seen, result = set(), []
+    for setup in setups:
+        key = (setup.get("side"), str(setup.get("t_complete")), float(setup.get("entry", 0)))
+        if key not in seen:
+            seen.add(key)
+            result.append(setup)
+    return result
+
+
+def _closed_at_or_before(df, ts):
+    """Return rows available at setup time; invalid timestamps fail closed."""
+    if df is None:
+        return pd.DataFrame()
+    try:
+        cutoff = pd.Timestamp(ts)
+        idx = pd.to_datetime(df["open_time"], utc=True) if "open_time" in df.columns else pd.to_datetime(df.index, utc=True)
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.tz_localize("UTC")
+        else:
+            cutoff = cutoff.tz_convert("UTC")
+        return df.loc[idx <= cutoff]
+    except Exception:
+        return df.iloc[0:0]
+
+
+def setup_volume_ratio(zone_df, setup_ts, lookback: int = 20):
+    """Setup candle volume / median prior volume, using only causal rows."""
+    rows = _closed_at_or_before(zone_df, setup_ts)
+    if len(rows) < lookback + 1 or "volume" not in rows:
+        return None
+    baseline = float(rows["volume"].iloc[-lookback - 1:-1].median())
+    return float(rows["volume"].iloc[-1]) / baseline if baseline > 0 else None
+
+
+def setup_observability(zone_df, btc_df, setup_ts) -> Dict[str, Any]:
+    """Causal setup metrics from closed zone candles only."""
+    def metrics(df, prefix):
+        rows = _closed_at_or_before(df, setup_ts)
+        if len(rows) < 20:
+            return {}
+        close = rows["close"].astype(float)
+        high, low, opn = rows["high"].astype(float), rows["low"].astype(float), rows["open"].astype(float)
+        prev = close.shift(1)
+        tr = pd.concat([high-low, (high-prev).abs(), (low-prev).abs()], axis=1).max(axis=1)
+        atr14 = float(tr.iloc[-14:].mean())
+        out = {
+            f"{prefix}_ret_1": float(close.iloc[-1] / close.iloc[-2] - 1),
+            f"{prefix}_ret_4": float(close.iloc[-1] / close.iloc[-5] - 1) if len(close) >= 5 else None,
+            f"{prefix}_ret_12": float(close.iloc[-1] / close.iloc[-13] - 1) if len(close) >= 13 else None,
+            f"{prefix}_ema50_dist": float(close.iloc[-1] / close.ewm(span=50, adjust=False).mean().iloc[-1] - 1),
+            f"{prefix}_atr_pct": atr14 / float(close.iloc[-1]) * 100 if close.iloc[-1] else None,
+            f"{prefix}_body_atr": abs(float(close.iloc[-1] - opn.iloc[-1])) / atr14 if atr14 else None,
+        }
+        if "volume" in rows:
+            baseline = float(rows["volume"].astype(float).iloc[-21:-1].median()) if len(rows) >= 21 else 0.0
+            out[f"{prefix}_volume_ratio"] = float(rows["volume"].iloc[-1]) / baseline if baseline > 0 else None
+        return out
+    return {**metrics(zone_df, "pair"), **metrics(btc_df, "btc")}
+
+
+def btc_stability_gate(btc_df, setup_ts, bars: int = 4) -> bool:
+    """Allow only non-negative BTC return over N closed candles at setup time."""
+    rows = _closed_at_or_before(btc_df, setup_ts)
+    if len(rows) < bars + 1 or "close" not in rows:
+        return False
+    start, end = float(rows["close"].iloc[-bars - 1]), float(rows["close"].iloc[-1])
+    return start > 0 and end / start - 1 >= 0
+
 
 def _utc_day() -> str:
     return dt.datetime.now(dt.timezone.utc).date().isoformat()
@@ -273,7 +470,8 @@ class Engine:
                  leverage: int, dry: bool, use_cvd: bool = False, use_btc: bool = False,
                  tag: str = "", ema_dist: float = 0.0, min_turn: float = 0.0, sl_swing: int = 0,
                  direction: str = "both", warm_batch: int = 40, cold_batch: int = 25,
-                 soft_pending_cap: int = 20, stoch_max: float = 0.0):
+                 soft_pending_cap: int = 20, stoch_max: float = 0.0, btc_corr: bool = False,
+                 volume_ratio_min: float = 0.0, btc_stability_bars: int = 0):
         self.ex = ex
         self.risk = risk
         self.tier = tier
@@ -282,6 +480,7 @@ class Engine:
         self.dry = dry
         self.use_cvd = use_cvd
         self.use_btc = use_btc
+        self.use_btc_corr = btc_corr
         # #4: relax btc_regime to STRONG-only. env BTC_REGIME_STRONG_PCT (%, default 0
         # = original binary filter). e.g. 0.75 => only block counter-trend when
         # |EMA50-EMA200|/EMA200 >= 0.75%. Weak/choppy regime allows both sides.
@@ -302,6 +501,8 @@ class Engine:
         self.cold_batch = cold_batch
         self.soft_pending_cap = soft_pending_cap
         self.stoch_max = stoch_max
+        self.volume_ratio_min = volume_ratio_min
+        self.btc_stability_bars = btc_stability_bars
         # Live audit fixes (env-tunable so a rollback needs no rebuild):
         # SL_FLOOR_PCT — minimum stop distance; sub-1.5% stops were net-negative live.
         # NEAREST_MAX_AGE — cap setup age (LTF bars); 0 previously meant "never expire",
@@ -309,6 +510,7 @@ class Engine:
         self.sl_floor_pct = float(os.environ.get("SL_FLOOR_PCT", "0") or 0)
         self.NEAREST_MAX_AGE = int(os.environ.get("NEAREST_MAX_AGE", "0") or 0)
         self._btc_trend = None
+        self._btc_corr_df = None
         self._stats = {"cand": 0, "stale": 0, "fresh": 0, "blocked": 0,
                        "blocked_max_open": 0, "blocked_pending_cap": 0, "blocked_oi_pressure": 0,
                        "min_age": 9999}
@@ -316,6 +518,7 @@ class Engine:
         self.trades: List[Dict[str, Any]] = []
         self.closed: List[Dict[str, Any]] = []
         self._seen: set = set()
+        self._journal_seen: set = set()
         self._cooldowns: dict = {}       # symbol -> {ts, reason} cooldown after close
         self._data_short: set = set()    # symbols with <260 bars (retry with backoff)
         self._adv_spent_sec = 0.0        # LLM wall-time spent this cycle (budget)
@@ -340,6 +543,7 @@ class Engine:
                 self.trades = d.get("trades", [])
                 self.closed = d.get("closed", [])
                 self._seen = set(tuple(x) for x in d.get("seen", []))
+                self._journal_seen = set(tuple(x) for x in d.get("journal_seen", []))
                 if "risk" in d:
                     self.risk.load_dict(d["risk"])
                 # Restore scan tracking if existing
@@ -384,10 +588,12 @@ class Engine:
     def _save(self) -> None:
         try:
             self._prune_seen()
+            self._journal_seen = prune_journal_seen(self._journal_seen)
             self._path().write_text(json.dumps({
                 "trades": self.trades,
                 "closed": self.closed,
                 "seen": [list(x) for x in self._seen],
+                "journal_seen": [list(x) for x in self._journal_seen],
                 "risk": self.risk.to_dict(),
                 "cooldowns": self._cooldowns,
                 "last_managed_ts": self._last_managed_ts,
@@ -473,10 +679,47 @@ class Engine:
                         max_age=age_arg, sl_swing=self.sl_swing,
                         sl_floor_pct=self.sl_floor_pct) \
             if self.direction in ("both", "short") else []
+        bull, bear = unique_setups(bull), unique_setups(bear)
         if self.use_cvd:
             bull = _filter_flow(symbol, 0, "BULL", bull, ltf, True, False)
             bear = _filter_flow(symbol, 0, "BEAR", bear, ltf, True, False)
-        if self.use_btc and self._btc_trend is not None:
+        if self.use_btc_corr:
+            if self._btc_corr_df is None or len(self._btc_corr_df) == 0:
+                self._stats["blocked"] += len(bull) + len(bear)
+                self._stats["blocked_btc_corr"] = self._stats.get("blocked_btc_corr", 0) + len(bull) + len(bear)
+                return
+            vwap_regime = btc_vwap15_regime(self._btc_corr_df)
+            btc_regime = vwap_regime["regime"]
+            pair_15m = _drop_forming_bar(fetch_recent(symbol, "15m", 30), "15m")
+            corr = btc_corr_context(pair_15m["close"] if pair_15m is not None else [],
+                                    self._btc_corr_df["close"] if self._btc_corr_df is not None else [])
+            kept = []
+            strong_expiry = int(os.getenv("FIB_EXPIRY_STRONG_BARS", "24") or 24)
+            for setup in bull + bear:
+                audit = {"symbol": symbol, "side": setup["side"], "t_complete": setup["t_complete"],
+                         "btc_regime": btc_regime, "btc_vwap_15m": vwap_regime.get("vwap"),
+                         "btc_vwap_dist_pct": vwap_regime.get("dist_pct"),
+                         "btc_vwap_buffer_pct": vwap_regime.get("buffer_pct"), **corr,
+                         **setup_observability(zone_df, self._btc_trend, setup["t_complete"])}
+                if journal_once(self._journal_seen, "btc_corr_check", symbol, setup["side"], setup["t_complete"]):
+                    self._flog("btc_corr_check", audit)
+                if btc_corr_allows(setup["side"], btc_regime, corr["note"], True):
+                    expiry_bars, expiry_reason = dynamic_fib_expiry_bars(
+                        setup["side"], btc_regime, corr["note"], bool(corr.get("decoupled")),
+                        FIB_EXPIRY, strong_expiry)
+                    setup["fib_expiry_bars"] = expiry_bars
+                    setup["fill_expiry_reason"] = expiry_reason
+                    setup["btc_corr"] = {**audit, "selected_fib_expiry_bars": expiry_bars,
+                                         "fill_expiry_reason": expiry_reason}
+                    kept.append(setup)
+                else:
+                    self._stats["blocked"] += 1
+                    self._stats["blocked_btc_corr"] = self._stats.get("blocked_btc_corr", 0) + 1
+                    if journal_once(self._journal_seen, "btc_corr_reject", symbol, setup["side"], setup["t_complete"]):
+                        self._flog("btc_corr_reject", audit)
+            bull = [s for s in kept if s["side"] == "BULL"]
+            bear = [s for s in kept if s["side"] == "BEAR"]
+        elif self.use_btc and self._btc_trend is not None:
             _sp = self.btc_strong_pct
             bull = [s for s in bull if _trend_ok_strong(self._btc_trend, s["t_complete"], "BULL", _sp)]
             bear = [s for s in bear if _trend_ok_strong(self._btc_trend, s["t_complete"], "BEAR", _sp)]
@@ -515,6 +758,31 @@ class Engine:
                 bull = _filter_stochastic(bull, ltf, "BULL", self.stoch_max)
                 bear = _filter_stochastic(bear, ltf, "BEAR", self.stoch_max)
             alls = bull + bear
+        if self.volume_ratio_min > 0:
+            kept = []
+            for setup in alls:
+                ratio = setup_volume_ratio(zone_df, setup.get("t_complete"))
+                audit = {"symbol": symbol, "side": setup.get("side"), "gate": "volume_ratio",
+                         "value": ratio, "threshold": self.volume_ratio_min}
+                self._flog("experiment_gate_check", audit)
+                if ratio is not None and ratio >= self.volume_ratio_min:
+                    kept.append(setup)
+                else:
+                    self._flog("experiment_gate_reject", audit)
+            alls = kept
+        if self.btc_stability_bars > 0:
+            btc_m30 = _drop_forming_bar(fetch_recent("BTCUSDT", "30m", 20), "30m")
+            kept = []
+            for setup in alls:
+                allowed = btc_stability_gate(btc_m30, setup.get("t_complete"), self.btc_stability_bars)
+                audit = {"symbol": symbol, "side": setup.get("side"), "gate": "btc_stability",
+                         "bars": self.btc_stability_bars, "allowed": allowed}
+                self._flog("experiment_gate_check", audit)
+                if allowed:
+                    kept.append(setup)
+                else:
+                    self._flog("experiment_gate_reject", audit)
+            alls = kept
         n = len(ltf)
         nearest_age = 9999
         for s in alls:
@@ -935,12 +1203,14 @@ class Engine:
 
             if result.get("ok"):
                 step = LTF_MIN[TIERS[self.tier]["ltf"]]
+                expiry_bars = int(s.get("fib_expiry_bars", FIB_EXPIRY))
                 rec = {
                     "symbol": symbol, "tier": self.tier, "side": side, "imb_side": s["side"],
                     "entry": entry, "sl": sl, "tp": tp, "qty": 0,
                     "status": "PENDING",
                     "t_complete": str(s["t_complete"]),
-                    "expiry_min": FIB_EXPIRY * step, "opened_at": time.time(),
+                    "expiry_min": expiry_bars * step, "fib_expiry_bars": expiry_bars,
+                    "fill_expiry_reason": s.get("fill_expiry_reason", "base"), "opened_at": time.time(),
                     "gateway_intent_id": result.get("intent_id"),
                     "gateway_notional": result.get("notional"),
                     "via_gateway": True,
@@ -970,11 +1240,14 @@ class Engine:
         self.ex.set_leverage(symbol, self.leverage)
         self.ex.limit_entry(symbol, side, qty, entry)
         step = LTF_MIN[TIERS[self.tier]["ltf"]]
+        expiry_bars = int(s.get("fib_expiry_bars", FIB_EXPIRY))
         rec = {
             "symbol": symbol, "tier": self.tier, "side": side, "imb_side": s["side"],
             "entry": entry, "sl": sl, "tp": tp, "qty": qty, "status": "PENDING",
             "t_complete": str(s["t_complete"]),
-            "expiry_min": FIB_EXPIRY * step, "opened_at": time.time()
+            "expiry_min": expiry_bars * step, "fib_expiry_bars": expiry_bars,
+            "fill_expiry_reason": s.get("fill_expiry_reason", "base"), "opened_at": time.time(),
+            "btc_corr": s.get("btc_corr")
         }
         rec.update(self._oi_snapshot(symbol))
         self.trades.append(rec)
@@ -1028,6 +1301,12 @@ class Engine:
 
         if self._filled(t, symbol, hi, lo):
             t["status"] = "OPEN"
+            # Keep processing time separate from market bar time. A scan can
+            # discover old 1m bars several minutes late; lifecycle audit needs
+            # actual bar that touched entry.
+            if bar_epoch:
+                t["fill_bar_ts"] = dt.datetime.fromtimestamp(bar_epoch, dt.timezone.utc).isoformat()
+            t["fill_detected_at"] = time.time()
             tp_note = "software SL/TP"
             if not self.dry:  # HARDWARE SL+TP via Algo Order API
                 try:
@@ -1045,7 +1324,8 @@ class Engine:
             tg(msg)
             self._flog("FILL", t)
 
-    def _manage_open(self, t: Dict[str, Any], symbol: str, hi: float, lo: float, close: float) -> None:
+    def _manage_open(self, t: Dict[str, Any], symbol: str, hi: float, lo: float, close: float,
+                     bar_epoch: float = 0.0, closed_m5: bool = False) -> None:
         # Gateway-managed positions: exits handled by gateway trader
         if t.get("via_gateway"):
             return
@@ -1057,6 +1337,8 @@ class Engine:
                     exit_price, reason = t["sl"], "SL"
                 elif hi >= t["tp"]:
                     exit_price, reason = t["tp"], "TP"
+                elif self.use_btc_corr:
+                    exit_price, reason = smart_exit_step(t, hi, lo, close, closed_m5)
             else:
                 if hi >= t["sl"]:
                     exit_price, reason = t["sl"], "SL"
@@ -1078,7 +1360,10 @@ class Engine:
         fees = t["entry"] * MAKER_FEE + exit_price * (TAKER_FEE + SLIP)
         pnl = t["qty"] * (gross - fees)
         self.risk.record(pnl)
-        t.update({"status": "CLOSED", "exit": exit_price, "reason": reason, "pnl": pnl})
+        t.update({"status": "CLOSED", "exit": exit_price, "reason": reason, "pnl": pnl,
+                  "exit_bar_ts": (dt.datetime.fromtimestamp(bar_epoch, dt.timezone.utc).isoformat()
+                                   if bar_epoch else None),
+                  "exit_detected_at": time.time()})
         self.closed.append(t)
         # COOLDOWN: prevent immediate re-entry after close
         self._add_cooldown(symbol, reason or "UNKNOWN")
@@ -1159,7 +1444,8 @@ class Engine:
                 elif t["status"] == "OPEN":
                     # Conservative same-bar ordering: SL before TP (matches the
                     # backtest _manage_exit assumption) — handled in _manage_open.
-                    self._manage_open(t, symbol, hi, lo, close)
+                    self._manage_open(t, symbol, hi, lo, close, epoch,
+                                      closed_m5=(tf == "1m" and int(epoch) % 300 == 240))
         self._last_managed_ts[symbol] = new_bars[-1][0]
 
     def cycle(self, symbols: List[str], interval_sec: int = 0) -> None:
@@ -1169,15 +1455,18 @@ class Engine:
         self._stats = {"cand": 0, "stale": 0, "fresh": 0, "blocked": 0,
                        "blocked_max_open": 0, "blocked_pending_cap": 0,
                        "blocked_adversarial": 0, "blocked_entry_far": 0,
-                       "adv_calls": 0, "open_pending_err": 0,
+                       "blocked_btc_corr": 0, "adv_calls": 0, "open_pending_err": 0,
                        "data_short": len(self._data_short), "min_age": 9999}
         self._adv_spent_sec = 0.0  # reset per-cycle LLM budget (3.1)
         self._scan_tick += 1
-        if self.use_btc:
+        if self.use_btc or self.use_btc_corr:
             try:
                 self._btc_trend = _trend(fetch_recent("BTCUSDT", TIERS[self.tier]["zone"], 300))
+                if self.use_btc_corr:
+                    self._btc_corr_df = _drop_forming_bar(fetch_recent("BTCUSDT", "15m", 30), "15m")
             except Exception:
                 self._btc_trend = None
+                self._btc_corr_df = None
         halt = self.risk.block_reason(sum(1 for t in self.trades if t["status"] == "OPEN"))
         active_symbols = []
         for t in self.trades:
@@ -1235,6 +1524,11 @@ class Engine:
                 self.manage(sym)
                 if not halt:
                     self.scan_symbol(sym)
+                    # Reconcile newly placed orders in same cycle. Without this,
+                    # first fill/exit waits one full scan cycle.
+                    if any(t.get("symbol") == sym and t.get("status") in ("PENDING", "OPEN")
+                           for t in self.trades):
+                        self.manage(sym)
             except Exception as exc:
                 print(f" {sym} err: {exc}")
 
@@ -1339,6 +1633,7 @@ def main() -> None:
     ap.add_argument("--arm", action="store_true", help="actually send real orders (requires --live)")
     ap.add_argument("--cvd", action="store_true", help="require CVD confirmation (recommended for H1)")
     ap.add_argument("--btc-regime", action="store_true", help="only trade in BTC's macro-regime direction")
+    ap.add_argument("--btc-corr", action="store_true", help="pair-specific 15m BTC follower/no-follower gate")
     ap.add_argument("--adversarial", action="store_true", help="run bull vs bear LLM debate before entry")
     ap.add_argument("--tag", default="", help="state/log suffix to isolate parallel instances (e.g. _paper)")
     ap.add_argument("--ema-dist", type=float, default=0.0, help="min |price-EMA200|/ATR gate (zone TF); 0=off")
@@ -1348,8 +1643,12 @@ def main() -> None:
     ap.add_argument("--cold-batch", type=int, default=25, help="max COLD symbols to refresh per cycle")
     ap.add_argument("--soft-pending-cap", type=int, default=20, help="max PENDING orders before blocking new setups")
     ap.add_argument("--stoch-max", type=float, default=0.0, help="Stochastic %K ceiling filter; 0=off, 50=recommended")
-    ap.add_argument("--direction", choices=["both", "long", "short"], default="both", 
+    ap.add_argument("--direction", choices=["both", "long", "short"], default="both",
                    help="only trade long, short, or both (default: both)")
+    ap.add_argument("--volume-ratio-min", type=float, default=0.0,
+                   help="experimental setup-candle volume / prior-20 median gate; 0=off")
+    ap.add_argument("--btc-stability-bars", type=int, default=0,
+                   help="experimental non-negative BTC M30 return gate over N bars; 0=off")
     a = ap.parse_args()
 
     # #3: optional LTF override so M30 can differentiate from H1 (both default 5m
@@ -1372,13 +1671,14 @@ def main() -> None:
                  ema_dist=a.ema_dist, min_turn=a.min_turn,
                  sl_swing=a.sl_swing, direction=a.direction,
                  warm_batch=a.warm_batch, cold_batch=a.cold_batch,
-                 soft_pending_cap=a.soft_pending_cap, stoch_max=a.stoch_max)
+                 soft_pending_cap=a.soft_pending_cap, stoch_max=a.stoch_max, btc_corr=a.btc_corr,
+                 volume_ratio_min=a.volume_ratio_min, btc_stability_bars=a.btc_stability_bars)
     eng.use_adversarial = a.adversarial
     print(f"[DEBUG] use_adversarial={eng.use_adversarial}")
     
     mode = "LIVE-ARMED (REAL ORDERS)" if not dry else "DRY/PAPER (no real orders)"
     print(f"[ENGINE {a.tier}{a.tag}] {mode} | symbols={len(a.symbols)} | risk={a.risk_pct:.0%} "
-          f"equity_ref={a.equity} lev={a.leverage} cvd={a.cvd} btc_regime={a.btc_regime} "
+          f"equity_ref={a.equity} lev={a.leverage} cvd={a.cvd} btc_regime={a.btc_regime} btc_corr={a.btc_corr} "
           f"ema_dist={a.ema_dist} min_turn={a.min_turn} sl_swing={a.sl_swing} "
           f"stoch_max={a.stoch_max} "
           f"warm_batch={a.warm_batch} cold_batch={a.cold_batch} soft_pending_cap={a.soft_pending_cap} "

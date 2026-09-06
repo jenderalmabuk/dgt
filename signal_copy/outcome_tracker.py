@@ -18,6 +18,7 @@ so a restart does not lose in-flight trackers.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -27,7 +28,7 @@ from .channel_performance import get_tracker
 from .signal_schema import ParsedSignal, SignalSide
 from . import signal_copy_config as scfg
 
-STORE = Path("data/signal_outcomes.json")
+STORE = Path(os.getenv("SIGNAL_COPY_OUTCOME_STORE", "data/signal_outcomes.json"))
 
 # Fallback horizon if the channel has no expiry profile (should not happen since
 # expiry_for_channel always returns standard for unmapped ids).
@@ -45,7 +46,8 @@ class SignalOutcomeTracker:
     def _load(self) -> None:
         if STORE.exists():
             try:
-                self._open = json.loads(STORE.read_text()) or {}
+                raw = STORE.read_text().strip()
+                self._open = json.loads(raw) if raw else {}
             except Exception as exc:
                 logger.warning("[OUTCOME] load failed: %s", exc)
                 self._open = {}
@@ -55,13 +57,15 @@ class SignalOutcomeTracker:
     def _save(self) -> None:
         try:
             STORE.parent.mkdir(parents=True, exist_ok=True)
-            STORE.write_text(json.dumps(self._open, indent=2))
+            tmp = STORE.with_suffix(STORE.suffix + ".tmp")
+            tmp.write_text(json.dumps(self._open, indent=2))
+            tmp.replace(STORE)
         except Exception as exc:
             logger.warning("[OUTCOME] save failed: %s", exc)
 
     # ---------- snapshot ----------
     def track(self, sig: ParsedSignal, metrics: Dict[str, Any],
-              *, verdict: str = "", was_executed: bool = False) -> None:
+              *, verdict: str = "", execution_intended: bool = False) -> None:
         """Snapshot a validated signal for virtual outcome tracking.
 
         Skips signals lacking the data needed to define an outcome, and skips
@@ -105,13 +109,15 @@ class SignalOutcomeTracker:
                 "created_at": time.time(),
                 "expiry_sec": expiry,
                 "verdict": verdict,
-                "was_executed": bool(was_executed),
+                "execution_intended": bool(execution_intended),
+                "gateway_accepted": False,
+                "position_confirmed": False,
             }
             self._save()
             logger.info(
-                "[OUTCOME] tracking %s %s %s entry=%.6g tp1=%.6g sl=%.6g exp=%.0fs exec=%s",
+                "[OUTCOME] tracking %s %s %s entry=%.6g tp1=%.6g sl=%.6g exp=%.0fs intent=%s",
                 sig.symbol, side, (sig.source_name or cid), entry, tp1, sl,
-                expiry, was_executed,
+                expiry, execution_intended,
             )
         except Exception as exc:
             logger.warning("[OUTCOME] track failed: %s", exc)

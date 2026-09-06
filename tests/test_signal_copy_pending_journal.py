@@ -71,6 +71,20 @@ class PendingJournalTest(unittest.TestCase):
         from signal_copy.pending_journal import row_age_seconds
         self.assertGreater(row_age_seconds({"created_epoch": time.time() - 120}), 119)
 
+    def test_loader_skips_corrupt_line_and_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pending.jsonl"
+            row = {"event": "PENDING", "signal_id": "live", "symbol": "ETHUSDT"}
+            path.write_text(json.dumps(row) + "\n{broken\n")
+            with patch.dict(os.environ, {"SIGNAL_COPY_PENDING_JOURNAL": str(path)}):
+                import importlib
+                import signal_copy.pending_journal as journal
+                journal = importlib.reload(journal)
+                with self.assertLogs("signal_copy.pending_journal", level="WARNING") as logs:
+                    active = journal.load_latest_pending()
+        self.assertEqual(active, [row])
+        self.assertIn("line 2", " ".join(logs.output))
+
     def test_restore_rows_rebuilds_signal_geometry(self):
         from signal_copy.pending_journal import signal_from_row
         sig = signal_from_row({

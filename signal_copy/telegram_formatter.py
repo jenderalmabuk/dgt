@@ -450,7 +450,7 @@ def build_execution_message(
     side_str = side.value if hasattr(side, "value") else str(side).upper()
 
     icon = "🟢" if side_str == "LONG" else "🔴"
-    ok = getattr(outcome, "ok", False)
+    ok = bool(getattr(outcome, "position_confirmed", False))
     reason = getattr(outcome, "reason", "UNKNOWN")
 
     entry_price = getattr(outcome, "entry_price", 0.0)
@@ -459,20 +459,27 @@ def build_execution_message(
     tp1 = getattr(outcome, "tp1", 0.0)
     tp_full = getattr(outcome, "tp_full", 0.0)
     risk_amount = getattr(outcome, "risk_amount", 0.0)
+    raw = getattr(outcome, "raw", None) or {}
+    qty = float(raw.get("qty", 0) or 0)
+    entry_fee = float(raw.get("entry_fee", 0) or 0)
+    fill_risk = float(raw.get("max_loss_usd_at_fill", risk_amount) or 0)
+    tp_ladder = list(getattr(sig, "take_profits", None) or [])
 
     if ok:
-        header = f"✅ <b>EXECUTED</b> {icon} {side_str} {symbol}"
+        header = f"✅ <b>FILLED / POSITION CONFIRMED</b> {icon} {side_str} {symbol}"
     else:
-        header = f"✅ VALID tapi ❌ <b>NOT EXECUTED</b> {icon} {side_str} {symbol}"
+        header = f"✅ VALID tapi ❌ <b>NOT EXECUTED / NOT FILLED</b> {icon} {side_str} {symbol}"
 
     tv_link = get_tradingview_link(symbol)
 
     lines = [
         header,
         f"💰 Entry: {format_price(entry_price)}",
-        f"🎯 TP1: {format_price(tp1)} | Full: {format_price(tp_full)}",
+        "🎯 " + (" | ".join(f"TP{i}: {format_price(tp)}" for i, tp in enumerate(tp_ladder, 1))
+                   or f"TP1: {format_price(tp1)} | Full: {format_price(tp_full)}"),
         f"🛑 SL: {format_price(sl_price)}",
-        f"📊 Notional: ${notional:.0f} | Risk: ${risk_amount:.2f}",
+        f"📊 Qty: {qty:.8g} | Notional: ${notional:.0f}",
+        f"💸 Entry Fee: ${entry_fee:.2f} | Actual-fill Risk: ${fill_risk:.2f}",
         (f"📐 Drift: {getattr(outcome, 'entry_drift_r', 0.0):.2f}R | RR1: {getattr(outcome, 'rr_tp1', 0.0):.2f}R | RR Full: {getattr(outcome, 'rr_full', 0.0):.2f}R" if ok else ""),
         f"📌 Status: {reason}",
     ]
@@ -520,20 +527,30 @@ def build_close_message(payload: Dict[str, Any]) -> str:
     else:
         header_icon = "✅"
 
-    if partial and partial_fraction > 0:
+    if partial:
         pct = partial_fraction * 100.0
-        title = f"{header_icon} <b>CLOSE (Partial {pct:.0f}%)</b> {icon} {side} {symbol}"
+        suffix = f" {pct:.0f}%" if pct > 0 else ""
+        title = f"{header_icon} <b>TP PARTIAL{suffix}</b> {icon} {side} {symbol}"
     else:
         title = f"{header_icon} <b>CLOSE</b> {icon} {side} {symbol}"
 
     lines = [
         title,
+        f"💰 Entry: {format_price(_safe_float(payload, 'entry_price', default=0.0))}",
         f"💰 Exit: {format_price(exit_price)}",
+        f"📦 Qty: {_safe_float(payload, 'qty', default=0.0):.8g}",
         f"📊 PnL: <b>{pnl_pct:+.2f}%</b> (${pnl_amount:+.2f})",
         f"⏱️ Hold: {hold_minutes:.1f} min",
         f"💼 Equity: ${equity:.2f}",
         f"📌 Reason: {normalized_reason}",
     ]
+
+    if partial:
+        lines.extend([f"📦 Remaining: {_safe_float(payload, 'remaining_qty', default=0.0):.8g}",
+                      f"🎯 Next TP: {format_price(_safe_float(payload, 'next_tp', default=0.0))}"])
+    else:
+        lines.append(f"📊 Notional: ${_safe_float(payload, 'notional_usd', default=0.0):.2f}")
+    lines.append(f"📐 RR: {_safe_float(payload, 'rr', default=0.0):.2f}R | Fee: ${_safe_float(payload, 'fee_usd', default=0.0):.2f}")
 
     if original_sl > 0:
         lines.append(f"🛑 Original SL: {format_price(original_sl)}")

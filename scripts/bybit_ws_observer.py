@@ -16,10 +16,10 @@ BATCH = int(os.getenv("BYBIT_WS_BATCH", "200"))
 
 class ClosedCandleDeduper:
     def __init__(self) -> None:
-        self.seen: set[tuple[str, int]] = set()
+        self.seen: set[tuple[str, int, str]] = set()
 
-    def accept(self, symbol: str, start: int) -> bool:
-        key = (symbol, start)
+    def accept(self, symbol: str, start: int, timeframe: str = "15m") -> bool:
+        key = (symbol, start, timeframe)
         if key in self.seen:
             return False
         self.seen.add(key)
@@ -33,8 +33,19 @@ def parse_kline(msg: dict[str, Any]) -> dict[str, Any] | None:
     if not data or data[0].get("confirm") is not True:
         return None
     topic = str(msg.get("topic", ""))
-    symbol = topic.rsplit(".", 1)[-1]
-    return {"symbol": symbol, "start": int(data[0]["start"]), "closed": True}
+    parts = topic.split(".")
+    symbol = parts[-1]
+    timeframe = "4h" if parts[-2] == "240" else "15m"
+    row = data[0]
+    candle = None
+    if all(key in row for key in ("open", "high", "low", "close", "volume")):
+        candle = {
+            "open_time": int(row["start"]),
+            "open": float(row["open"]), "high": float(row["high"]),
+            "low": float(row["low"]), "close": float(row["close"]),
+            "volume": float(row["volume"]),
+        }
+    return {"symbol": symbol, "start": int(row["start"]), "timeframe": timeframe, "closed": True, "candle": candle}
 
 
 def batches(symbols: list[str]) -> list[list[str]]:
@@ -54,7 +65,8 @@ async def maybe_call(callback: Callable[[dict[str, Any]], Any] | None, event: di
 
 
 async def observe(symbols: list[str], duration: int = 300,
-                  callback: Callable[[dict[str, Any]], Any] | None = None) -> None:
+                  callback: Callable[[dict[str, Any]], Any] | None = None,
+                  include_h4: bool = False) -> None:
     dedupe = ClosedCandleDeduper()
     tasks: set[asyncio.Task[Any]] = set()
     deadline = time.monotonic() + duration
@@ -63,8 +75,11 @@ async def observe(symbols: list[str], duration: int = 300,
         while time.monotonic() < deadline:
             try:
                 async with session.ws_connect(WS_URL, heartbeat=20, autoping=True) as ws:
-                    for batch in batches(symbols):
-                        await ws.send_json({"op": "subscribe", "args": [f"kline.15.{s}" for s in batch]})
+                    topics = [f"kline.15.{s}" for s in symbols]
+                    if include_h4:
+                        topics += [f"kline.240.{s}" for s in symbols]
+                    for i in range(0, len(topics), BATCH):
+                        await ws.send_json({"op": "subscribe", "args": topics[i:i + BATCH]})
                     attempt = 0
                     while time.monotonic() < deadline:
                         msg = await ws.receive(timeout=30)
@@ -77,7 +92,7 @@ async def observe(symbols: list[str], duration: int = 300,
                             print(json.dumps({"observer_only": True, "control": payload}), flush=True)
                             continue
                         event = parse_kline(payload)
-                        if event and dedupe.accept(event["symbol"], event["start"]):
+                        if event and dedupe.accept(event["symbol"], event["start"], event["timeframe"]):
                             event = {**event, "received_at": time.time()}
                             print(json.dumps({"observer_only": True, **event}), flush=True)
                             task = asyncio.create_task(maybe_call(callback, event))

@@ -51,10 +51,13 @@ def pending_fill_allowed(sig, price: float, max_drift_r: float = 0.10) -> tuple[
 
 
 def route_entry(sig, price: float) -> EntryDecision:
-    """Market inside zone or within 0.10R; otherwise wait at nearest boundary."""
+    """Market only inside provider zone; otherwise wait at nearest boundary."""
     price = float(price or 0.0)
     if price <= 0:
         return EntryDecision(EntryAction.REJECT, 0.0, "NO_MARKET_PRICE")
+    midpoint = float(sig.entry_mid or 0.0)
+    if midpoint > 0 and abs(price - midpoint) / min(price, midpoint) >= 1.0:
+        return EntryDecision(EntryAction.REJECT, price, "ENTRY_PRICE_SCALE_MISMATCH")
     sl = float(sig.stop_loss or 0.0)
     if sl and ((sig.is_long and price <= sl) or (not sig.is_long and price >= sl)):
         return EntryDecision(EntryAction.REJECT, price, "SL_ALREADY_PASSED")
@@ -66,12 +69,7 @@ def route_entry(sig, price: float) -> EntryDecision:
         entry, action, code = price, EntryAction.MARKET, "PRICE_INSIDE_ENTRY_ZONE"
     else:
         boundary = low if price < low else high
-        risk = abs(boundary - sl)
-        drift_r = abs(price - boundary) / risk if risk > 0 else float("inf")
-        if drift_r <= 0.1000001:
-            entry, action, code = price, EntryAction.MARKET, "MARKET_LATE_ENTRY_0_10R"
-        else:
-            entry, action, code = boundary, EntryAction.LIMIT, "PRICE_OUTSIDE_ENTRY_ZONE"
+        entry, action, code = boundary, EntryAction.LIMIT, "PRICE_OUTSIDE_ENTRY_ZONE"
     return EntryDecision(action, entry, code, passed, _rr_ladder(sig, entry))
 
 

@@ -56,8 +56,11 @@ def normalize_signal(sig: ParsedSignal, metrics: Dict[str, Any]) -> ParsedSignal
         else:
             return sig
 
+    provider_tps = list(sig.take_profits or [])
+    provider_sl_missing = sig.stop_loss is None or sig.stop_loss <= 0
+
     # --- improvise SL from ATR if missing ---
-    if sig.stop_loss is None or sig.stop_loss <= 0:
+    if provider_sl_missing:
         atr_pct = _f(metrics.get("atr_pct"), 0.0)
         sl_pct = atr_pct * _SL_ATR_MULT if atr_pct > 0 else 2.0
         sl_pct = max(_SL_MIN_PCT, min(sl_pct, _SL_MAX_PCT))
@@ -77,6 +80,8 @@ def normalize_signal(sig: ParsedSignal, metrics: Dict[str, Any]) -> ParsedSignal
         dist = abs(t - entry) / entry
         if _TP_MIN_DIST <= dist <= _TP_MAX_DIST:
             clean.append(t)
+        else:
+            sig.level_anomalies.append(f"PROVIDER_TP_OUTLIER:{t:g}")
 
     # --- improvise TP ladder from SL (1R/2R/3R) if none reliable ---
     if not clean and sig.stop_loss and sig.stop_loss > 0:
@@ -87,6 +92,9 @@ def normalize_signal(sig: ParsedSignal, metrics: Dict[str, Any]) -> ParsedSignal
             else:
                 clean = [entry - m * r for m in _R_MULTIPLES]
             sig.tp_source = "improvised_R"
+
+    if provider_sl_missing and provider_tps and sig.tp_source == "improvised_R":
+        sig.level_anomalies.append("MALFORMED_PROVIDER_LEVELS")
 
     # keep ordering consistent with side (TP1 nearest entry)
     if clean:

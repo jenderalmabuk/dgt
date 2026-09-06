@@ -42,13 +42,33 @@ def test_confirmed_setup_matches_backtest_formula(monkeypatch):
     assert setups[0]["sl_price"] == 94.0
     assert setups[0]["tp_price"] == pytest.approx(116.77)
     assert setups[0]["expires_at"] == str(ltf.open_time.iloc[9] + pd.Timedelta(minutes=90))
+    evidence = setups[0]["evidence"]
+    assert evidence["h4_zone"] == {"origin_at": "2025-12-31T00:00:00+00:00", "low": 95.0, "high": 105.0}
+    assert evidence["m15_imbalance"]["leg_low"] == 90.0
+    assert evidence["first_touch_at"] == str(ltf.open_time.iloc[6])
+    assert evidence["sweep_price"] == 96.0
+    assert evidence["displacement_price"] == 106.0
+    assert evidence["atr"] == 4.0
+    assert evidence["mss_candle"]["open_time"] == str(ltf.open_time.iloc[9])
+    assert evidence["formula"] == {"entry_ratio": 0.559, "atr_sl_buffer": 0.5, "rr": 2.0}
 
 
 def test_pending_limit_waits_fills_and_expires():
     setup = {"side": "LONG", "entry_price": 100.0, "confirmed_at": "2026-01-01 00:00:00", "expires_at": "2026-01-01 06:00:00"}
-    assert runner.pending_action(setup, 101, 102, pd.Timestamp("2026-01-01 01:00:00")) == "wait"
-    assert runner.pending_action(setup, 99, 102, pd.Timestamp("2026-01-01 01:00:00")) == "fill"
-    assert runner.pending_action(setup, 99, 102, pd.Timestamp("2026-01-01 06:01:00")) == "expired"
+    bars = pd.DataFrame({
+        "open_time": pd.date_range("2026-01-01 01:00:00", periods=3, freq="15min", tz="UTC"),
+        "open": [101.0, 101.0, 99.0], "high": [102.0, 102.0, 102.0],
+        "low": [100.5, 100.5, 100.5], "close": [101.0, 101.0, 100.2],
+    })
+    pending_since = pd.Timestamp("2026-01-01 00:30:00", tz="UTC")
+    now = pd.Timestamp("2026-01-01 01:45:00", tz="UTC")
+    assert runner.pending_action(setup, bars, pending_since, now) == "wait"
+
+    bars.loc[2, "low"] = 99.5
+    assert runner.pending_action(setup, bars, pending_since, now) == "fill"
+
+    now_expired = pd.Timestamp("2026-01-01 07:00:00", tz="UTC")
+    assert runner.pending_action(setup, bars, pending_since, now_expired) == "expired"
 
 
 def test_pending_cap_is_twenty(tmp_path):
@@ -105,6 +125,17 @@ def test_setup_and_fill_messages_are_separate():
     assert "🆕 SETUP H4 SELL BTCUSDT [fusion_quantum_h4_15m]" in placed
     assert "Entry 100 | SL 102 | TP 96 | RR 2.0" in placed
     assert "[PAPER] LIMIT placed" in placed
+    assert "Basis:" not in placed
+    audited = dict(setup, evidence={
+        "h4_zone": {"origin_at": "2025-12-31T00:00:00", "low": 95.0, "high": 105.0},
+        "h4_zone_age_hours": 48.0, "first_touch_at": "2026-01-02 00:00:00",
+        "pivot_high": 104.0, "pivot_low": 98.0, "sweep_price": 106.0,
+        "displacement_price": 96.0, "atr": 2.0,
+        "mss_candle": {"open_time": "2026-01-02 01:00:00", "open": 101.0, "high": 103.0, "low": 96.0, "close": 97.0, "volume": 1.0},
+    })
+    audited_message = runner.setup_message(audited)
+    assert "Basis: H4 BEAR zone 95-105 (age 48.0h)" in audited_message
+    assert "M15 sweep 106 | pivots H104/L98 | MSS close 97 | ATR 2" in audited_message
     assert "FILLED" not in placed
     assert filled.startswith("✅ FILLED BTCUSDT SELL @~99.5")
     assert "SETUP" not in filled

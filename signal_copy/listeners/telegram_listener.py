@@ -154,15 +154,29 @@ class TelegramSignalListener:
         return True
 
     async def start(self) -> None:
-        # Prefer telethon (reads any joined group); fall back to aiogram bot.
+        """Run one backend until shutdown; unexpected return is fatal.
+
+        Docker's restart policy can recover only when listener failure reaches
+        process boundary. Never leave parent loop alive after intake stops.
+        """
         if self.api_id and self.api_hash:
             try:
                 ok = await self._start_telethon()
-                if ok:
-                    return
             except Exception as exc:
-                logger.warning("[TG_LISTENER] telethon failed (%s); trying aiogram", exc)
-        await self._start_aiogram()
+                logger.exception("[TG_LISTENER] telethon failed")
+                raise RuntimeError("Telethon listener failed") from exc
+            if ok and self.running:
+                raise RuntimeError("Telethon listener stopped unexpectedly")
+
+        try:
+            ok = await self._start_aiogram()
+        except Exception as exc:
+            logger.exception("[TG_LISTENER] aiogram failed")
+            raise RuntimeError("aiogram listener failed") from exc
+        if not ok:
+            raise RuntimeError("no Telegram backend available")
+        if self.running:
+            raise RuntimeError("aiogram listener stopped unexpectedly")
 
     async def stop(self) -> None:
         self.running = False

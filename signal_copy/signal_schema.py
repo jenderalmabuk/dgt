@@ -64,6 +64,7 @@ class ParsedSignal:
     # How TP/SL were obtained: "signal" (from the message) or "improvised"
     tp_source: str = "signal"
     sl_source: str = "signal"
+    level_anomalies: List[str] = field(default_factory=list)
 
     # Identity / lifecycle
     signal_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
