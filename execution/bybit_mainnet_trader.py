@@ -841,7 +841,7 @@ class BybitMainnetTrader:
             
             # Get fresh mark price for this symbol
             try:
-                quote = self._get_fresh_close_quote(symbol)
+                quote = await self._get_fresh_close_quote(symbol)
                 mark = quote["mark_price"]
             except Exception as e:
                 logger.warning(f"[TRAILING_LOCK] {symbol} failed to get mark price: {e}")
