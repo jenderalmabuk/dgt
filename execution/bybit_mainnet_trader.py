@@ -92,6 +92,40 @@ class BybitMainnetTrader:
             logger.warning(f"[BYBIT_MAINNET] Fresh open price fetch failed {symbol}: {e}")
         return None
     
+    async def _get_fresh_close_quote(self, symbol: str) -> Dict[str, float]:
+        """
+        Get fresh mark price for close/trailing operations.
+        
+        Returns dict with mark_price for dynamic exit calculations.
+        """
+        try:
+            ticker = self.client.get_ticker(symbol)
+            if ticker and "markPrice" in ticker:
+                mark_price = float(ticker["markPrice"])
+                if mark_price > 0:
+                    return {
+                        "mark_price": mark_price,
+                        "last_price": float(ticker.get("lastPrice", mark_price)),
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+        except Exception as e:
+            logger.warning(f"[BYBIT_MAINNET] Fresh close quote fetch failed {symbol}: {e}")
+        
+        # Fallback to last price if mark price not available
+        try:
+            ticker = self.client.get_ticker(symbol)
+            if ticker and "lastPrice" in ticker:
+                price = float(ticker["lastPrice"])
+                return {
+                    "mark_price": price,
+                    "last_price": price,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+        except:
+            pass
+        
+        raise Exception(f"Failed to get fresh close quote for {symbol}")
+    
     async def _get_fresh_open_price(self, symbol: str) -> tuple[float, str]:
         """Get fresh open price for entry execution."""
         quote = await self._get_fresh_open_quote(symbol)
