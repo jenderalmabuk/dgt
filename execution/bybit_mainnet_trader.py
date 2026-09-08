@@ -852,9 +852,10 @@ class BybitMainnetTrader:
             sl = pos.get("sl_price", 0)
             risk_distance = abs(entry - sl) if sl else abs(entry * 0.01)
             
-            # Track high/low watermark
+            # Track high/low watermark (initialize with current mark if missing)
             if "high_watermark" not in pos:
                 pos["high_watermark"] = mark
+            if "low_watermark" not in pos:
                 pos["low_watermark"] = mark
             
             # Update watermarks
