@@ -630,7 +630,15 @@ class BybitMainnetTrader:
                 logger.warning(f"[BYBIT_MAINNET] Close notification failed: {notif_err}")
         
         except Exception as e:
-            logger.exception(f"[BYBIT_MAINNET] Close {symbol} failed: {e}")
+            err_str = str(e)
+            # Suppress expected errors
+            if "110017" in err_str and "zero position" in err_str:
+                # Position already closed externally - just cleanup local state
+                logger.info(f"[BYBIT_MAINNET] {symbol} already closed externally, cleaning up local state")
+                self.positions.pop(symbol, None)
+                self._save_positions()
+            else:
+                logger.exception(f"[BYBIT_MAINNET] Close {symbol} failed: {e}")
     
     async def sync_positions(self):
         """Sync local positions with exchange reality."""
