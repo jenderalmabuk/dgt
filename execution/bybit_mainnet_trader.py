@@ -363,7 +363,9 @@ class BybitMainnetTrader:
                 "entry_price": entry_price,
                 "sl_price": sl_price,
                 "tp_prices": tp_prices,
+                "tp_hit": [],  # Track which TPs have been hit
                 "qty": qty_str,
+                "qty_remaining": float(qty_str),  # Track remaining position size
                 "notional": notional,
                 "order_id": order_id,
                 "opened_at": now.isoformat(),
@@ -532,7 +534,27 @@ class BybitMainnetTrader:
         sl_kind: str = None,
         exit_price: float = None
     ):
-        """Close position and log to journal."""
+        """Close full position."""
+        pos = self.positions.get(symbol)
+        if not pos:
+            logger.warning(f"[BYBIT_MAINNET] Cannot close {symbol}: not in positions")
+            return
+        
+        # Use qty_remaining if available (for TP ladder compatibility)
+        qty = pos.get("qty_remaining", float(pos.get("qty", 0)))
+        await self._close_partial(symbol, reason, exit_price, qty, 0, sl_kind, full_close=True)
+    
+    async def _close_partial(
+        self,
+        symbol: str,
+        reason: str,
+        exit_price: float = None,
+        close_qty: float = None,
+        qty_remaining: float = None,
+        sl_kind: str = None,
+        full_close: bool = False
+    ):
+        """Close partial or full position."""
         pos = self.positions.get(symbol)
         if not pos:
             logger.warning(f"[BYBIT_MAINNET] Cannot close {symbol}: not in positions")
@@ -716,12 +738,56 @@ class BybitMainnetTrader:
                 await self._close(symbol, "HARD_SL", sl_kind=pos.get("sl_kind", "ORIGINAL"), exit_price=mark)
                 continue
             
-            # Check TP levels
+            # Check TP levels (partial closes: 25% per TP)
             tp_prices = pos.get("tp_prices", [])
-            for i, tp in enumerate(tp_prices):
-                if self._level_hit(pos, mark, tp, favorable=True):
-                    await self._close(symbol, f"TP{i+1}", exit_price=mark)
-                    break
+            tp_hit = pos.get("tp_hit", [])
+            qty_remaining = pos.get("qty_remaining", float(pos.get("qty", 0)))
+            
+            if tp_prices and qty_remaining > 0:
+                for i, tp in enumerate(tp_prices):
+                    # Skip already hit TPs
+                    if i in tp_hit:
+                        continue
+                    
+                    # Check if TP level hit
+                    if self._level_hit(pos, mark, tp, favorable=True):
+                        # Calculate partial close size (25% of original)
+                        original_qty = float(pos.get("qty", 0))
+                        close_qty = original_qty * 0.25
+                        
+                        # Ensure we don't close more than remaining
+                        close_qty = min(close_qty, qty_remaining)
+                        
+                        # Mark this TP as hit
+                        tp_hit.append(i)
+                        pos["tp_hit"] = tp_hit
+                        
+                        # Update remaining quantity
+                        qty_remaining -= close_qty
+                        pos["qty_remaining"] = qty_remaining
+                        
+                        # Close partial position
+                        await self._close_partial(
+                            symbol=symbol,
+                            reason=f"TP{i+1}",
+                            exit_price=mark,
+                            close_qty=close_qty,
+                            qty_remaining=qty_remaining
+                        )
+                        
+                        logger.info(
+                            f"[BYBIT_MAINNET] {symbol} TP{i+1} @ {mark:.6f} | "
+                            f"Closed {close_qty:.4f} (25%) | Remaining: {qty_remaining:.4f}"
+                        )
+                        
+                        # If all TPs hit or remaining too small, close full position
+                        if qty_remaining < original_qty * 0.05:  # < 5% remaining
+                            await self._close(symbol, f"TP{i+1}_FINAL", exit_price=mark)
+                            break
+                        
+                        # Save updated position
+                        self._save_positions()
+                        break  # Process one TP per cycle
     
     def _level_hit(self, pos: Dict, mark: float, level: float, favorable: bool) -> bool:
         """Check if price level hit."""
