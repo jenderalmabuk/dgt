@@ -91,7 +91,7 @@ def _build_gateway() -> ExecutionGateway:
 
     # Restore realized paper equity so restarts don't reset the book to
     # STARTING_BALANCE while open positions persist.
-    if use_paper:
+    if trader_mode == "paper":
         from execution.paper_mainnet_trader import load_equity_state
         saved = load_equity_state()
         if saved and saved["equity"] > 0:
