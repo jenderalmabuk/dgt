@@ -52,8 +52,15 @@ def _build_gateway() -> ExecutionGateway:
     starting_balance = float(os.getenv("STARTING_BALANCE", "1000"))
     risk_mgr = RiskManager(starting_balance=starting_balance)
 
-    use_paper = os.getenv("GATEWAY_PAPER_MAINNET", "true").lower() in ("1", "true", "yes")
-    if use_paper:
+    # Trader mode: bybit (real money), paper (simulated), testnet (binance testnet)
+    trader_mode = os.getenv("GATEWAY_TRADER_MODE", "paper").lower()
+    
+    if trader_mode == "bybit":
+        from execution.bybit_mainnet_trader import BybitMainnetTrader
+        journal_path = os.getenv("JOURNAL_PATH", "/app/journal")
+        trader = BybitMainnetTrader(journal_path=journal_path)
+        logger.info("[GATEWAY] trader = BybitMainnetTrader (REAL MONEY - Bybit USDT Perpetuals)")
+    elif trader_mode == "paper":
         from execution.paper_mainnet_trader import PaperMainnetTrader
         # Gateway runs on the HOST (not inside docker), so the docker-internal
         # DNS name `fastapi:8000` won't resolve — default to the published port.
@@ -61,7 +68,7 @@ def _build_gateway() -> ExecutionGateway:
         nexus_api = os.getenv("PAPER_NEXUS_API", "http://localhost:8000")
         trader = PaperMainnetTrader(nexus_api=nexus_api)
         logger.info("[GATEWAY] trader = PaperMainnetTrader (mainnet-priced paper, nexus=%s)", nexus_api)
-    else:
+    elif trader_mode == "testnet":
         from execution.binance_testnet_trader import BinanceTestnetTrader
         api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
         api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "") or os.getenv("BINANCE_TESTNET_SECRET", "")
@@ -69,6 +76,8 @@ def _build_gateway() -> ExecutionGateway:
             raise RuntimeError("BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_API_SECRET must be set")
         trader = BinanceTestnetTrader(api_key=api_key, api_secret=api_secret)
         logger.info("[GATEWAY] trader = BinanceTestnetTrader (testnet)")
+    else:
+        raise ValueError(f"Unknown GATEWAY_TRADER_MODE: {trader_mode}. Use 'bybit', 'paper', or 'testnet'")
 
     # Let RiskManager see the trader's live positions for exposure/cluster math
     if hasattr(risk_mgr, "attach_trader"):
