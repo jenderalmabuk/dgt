@@ -646,11 +646,12 @@ class BybitMainnetTrader:
             # Check for missing positions (closed externally)
             for symbol in list(self.positions.keys()):
                 if symbol not in exchange_map:
-                    logger.warning(
+                    logger.info(
                         f"[BYBIT_MAINNET] {symbol} closed externally, "
                         f"removing from local state"
                     )
-                    await self._close(symbol, "EXTERNAL_CLOSE")
+                    # Just remove from local state (already closed on exchange)
+                    self.positions.pop(symbol, None)
             
             # Check for new positions (opened externally)
             for symbol, ex_pos in exchange_map.items():
