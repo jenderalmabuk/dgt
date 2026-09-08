@@ -713,7 +713,19 @@ class BybitMainnetTrader:
     async def sync_positions(self):
         """Sync local positions with exchange reality."""
         try:
-            exchange_positions = self.client.get_positions()
+            # Migrate existing positions to add TP ladder fields
+            for symbol, pos in self.positions.items():
+                if "tp_hit" not in pos:
+                    pos["tp_hit"] = []
+                if "qty_remaining" not in pos:
+                    pos["qty_remaining"] = float(pos.get("qty", 0))
+            
+            # Save migrated positions
+            if any("tp_hit" not in p or "qty_remaining" not in p for p in self.positions.values()):
+                self._save_positions()
+                logger.info("[BYBIT_MAINNET] Migrated existing positions for TP ladder")
+            
+            # Fetch exchange positions
             
             # Map exchange positions
             exchange_map = {
