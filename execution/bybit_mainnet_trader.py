@@ -343,18 +343,136 @@ class BybitMainnetTrader:
             self._save_positions()
             
             logger.info(
-                f"[BYBIT_MAINNET] OPENED {side} {symbol} @ {entry_str} | "
-                f"SL {sl_str} | TP {tp1_str} | qty {qty_str} | ${notional:.2f}"
+                f"[BYBIT_MAINNET] OPENED {side} {symbol} @ {entry_price:.6f} | "
+                f"qty={qty_str} | SL={sl_price:.6f} | TP1={tp_prices[0]:.6f}"
             )
             
             return True
-        
-        except BybitAPIError as e:
-            logger.error(f"[BYBIT_MAINNET] {symbol} API error: {e}")
-            return False
+            
         except Exception as e:
-            logger.exception(f"[BYBIT_MAINNET] {symbol} open failed: {e}")
+            logger.error(f"[BYBIT_MAINNET] Failed to open {symbol}: {e}")
             return False
+    
+    async def submit_open(self, timeout_sec: float = 30.0, **params) -> Optional[Dict[str, Any]]:
+        """
+        Gateway-compatible entry point for opening positions.
+        Validates params and delegates to open_position().
+        
+        Returns dict with execution status for gateway.
+        """
+        try:
+            symbol = str(params.get("symbol", ""))
+            side = str(params.get("side", "")).upper()
+            sl_price = float(params.get("sl", params.get("sl_price", 0)) or 0)
+            
+            # Parse TP ladder
+            tp_ladder = []
+            for i in range(1, 21):
+                value = float(params.get(f"tp{i}", 0) or 0)
+                if value:
+                    tp_ladder.append(value)
+            if not tp_ladder and params.get("tp_full"):
+                tp_ladder.append(float(params["tp_full"]))
+            
+            # Validate basic params
+            if not symbol or side not in ("LONG", "SHORT"):
+                logger.warning(f"[BYBIT_MAINNET] Invalid params symbol={symbol} side={side}")
+                return {"ok": False, "executed": False, "code": "INVALID_PARAMS",
+                        "reason": "Invalid symbol or side"}
+            
+            # Check if already open
+            if symbol in self.positions:
+                logger.info(f"[BYBIT_MAINNET] {symbol} already open — skip dup")
+                return {"ok": False, "executed": False, "code": "ALREADY_OPEN",
+                        "reason": f"{symbol} already open"}
+            
+            # Validate price quote
+            quote = params.get("execution_price_quote")
+            if not isinstance(quote, dict) or quote.get("price_fresh") is not True:
+                return {"ok": False, "executed": False, "code": "PRICE_PROVENANCE_REQUIRED",
+                        "reason": "Fresh price quote required"}
+            
+            try:
+                observed_at = datetime.fromisoformat(str(quote["price_observed_at"]).replace("Z", "+00:00"))
+                age_sec = (datetime.now(timezone.utc) - observed_at.astimezone(timezone.utc)).total_seconds()
+                mark = float(quote["price"])
+                mark_source = str(quote["price_source"])
+            except (KeyError, TypeError, ValueError):
+                return {"ok": False, "executed": False, "code": "INVALID_QUOTE",
+                        "reason": "Invalid price quote format"}
+            
+            if mark <= 0 or age_sec > 30.0:
+                return {"ok": False, "executed": False, "code": "STALE_GATEWAY_MARK",
+                        "reason": f"Stale mark: age={age_sec:.1f}s source={mark_source}"}
+            
+            requested_entry = float(params.get("entry_price", 0) or 0)
+            
+            # Check if entry diverges too much from mark
+            if requested_entry > 0 and mark > 0 and abs(mark - requested_entry) / requested_entry > 0.05:
+                logger.warning(f"[BYBIT_MAINNET] {symbol} stale mark {mark:.6f} vs route {requested_entry:.6f}")
+                return {"ok": False, "executed": False, "code": "PRICE_DIVERGENCE",
+                        "reason": f"Mark {mark:.6f} vs entry {requested_entry:.6f} >5%"}
+            
+            # Use requested entry or mark
+            entry_price = requested_entry if requested_entry > 0 else mark
+            
+            # Sanity: check SL hasn't been hit already
+            if side == "LONG" and sl_price and mark <= sl_price:
+                logger.warning(f"[BYBIT_MAINNET] {symbol} LONG mark {mark:.6f} <= SL {sl_price:.6f}")
+                return {"ok": False, "executed": False, "code": "SL_ALREADY_HIT",
+                        "reason": f"Mark {mark:.6f} already at/below SL {sl_price:.6f}"}
+            if side == "SHORT" and sl_price and mark >= sl_price:
+                logger.warning(f"[BYBIT_MAINNET] {symbol} SHORT mark {mark:.6f} >= SL {sl_price:.6f}")
+                return {"ok": False, "executed": False, "code": "SL_ALREADY_HIT",
+                        "reason": f"Mark {mark:.6f} already at/above SL {sl_price:.6f}"}
+            
+            # Filter TPs that haven't been hit
+            tp_ladder = [tp for tp in tp_ladder
+                        if (tp > mark if side == "LONG" else tp < mark)]
+            
+            if not tp_ladder:
+                logger.warning(f"[BYBIT_MAINNET] {symbol} {side} all TPs already passed")
+                return {"ok": False, "executed": False, "code": "ALL_TPS_PASSED",
+                        "reason": "All take profit levels already passed"}
+            
+            # Sanity: SL must be on correct side of entry
+            if side == "LONG" and sl_price >= entry_price:
+                logger.warning(f"[BYBIT_MAINNET] {symbol} LONG SL {sl_price:.6f} >= entry {entry_price:.6f}")
+                return {"ok": False, "executed": False, "code": "INVALID_SL",
+                        "reason": "SL must be below entry for LONG"}
+            if side == "SHORT" and sl_price and sl_price <= entry_price:
+                logger.warning(f"[BYBIT_MAINNET] {symbol} SHORT SL {sl_price:.6f} <= entry {entry_price:.6f}")
+                return {"ok": False, "executed": False, "code": "INVALID_SL",
+                        "reason": "SL must be above entry for SHORT"}
+            
+            # Attempt to open position
+            success = await self.open_position(
+                symbol=symbol,
+                side=side,
+                entry_price=entry_price,
+                sl_price=sl_price,
+                tp_prices=tp_ladder,
+                signal_metadata=params
+            )
+            
+            if success:
+                return {
+                    "ok": True,
+                    "executed": True,
+                    "symbol": symbol,
+                    "side": side,
+                    "entry_price": entry_price,
+                    "sl_price": sl_price,
+                    "tp_prices": tp_ladder
+                }
+            else:
+                return {"ok": False, "executed": False, "code": "EXECUTION_FAILED",
+                        "reason": "Failed to execute order on exchange"}
+                
+        except Exception as e:
+            logger.error(f"[BYBIT_MAINNET] submit_open error: {e}", exc_info=True)
+            return {"ok": False, "executed": False, "code": "EXCEPTION",
+                    "reason": str(e)}
     
     async def _close(
         self,
