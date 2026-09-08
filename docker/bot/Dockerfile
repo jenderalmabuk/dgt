@@ -25,6 +25,8 @@ COPY --chown=nexus:nexus fusion_quantum/ ./fusion_quantum/
 COPY --chown=nexus:nexus gateway/ ./gateway/
 # Copy execution layer (BinanceTestnetTrader)
 COPY --chown=nexus:nexus execution/ ./execution/
+# Copy notifications (Telegram trade alerts)
+COPY --chown=nexus:nexus notifications/ ./notifications/
 # Copy signal_copy config (ExecutionConfig, RiskManager)
 COPY --chown=nexus:nexus signal_copy/ ./signal_copy/
 # Copy risk engine (RiskManager) + shared utils (persistence_paths for journal).
