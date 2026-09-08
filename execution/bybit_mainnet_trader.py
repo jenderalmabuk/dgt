@@ -347,6 +347,21 @@ class BybitMainnetTrader:
                 f"qty={qty_str} | SL={sl_price:.6f} | TP1={tp_prices[0]:.6f}"
             )
             
+            # Send entry notification
+            try:
+                from notifications.telegram_notifier import send_open_trade
+                await send_open_trade({
+                    "symbol": symbol,
+                    "side": side,
+                    "entry_price": entry_price,
+                    "sl_price": sl_price,
+                    "tp1": tp_prices[0] if tp_prices else None,
+                    "notional": notional,
+                    "qty": qty_str,
+                })
+            except Exception as notif_err:
+                logger.warning(f"[BYBIT_MAINNET] Notification failed: {notif_err}")
+            
             return True
             
         except Exception as e:
@@ -553,6 +568,22 @@ class BybitMainnetTrader:
                 f"[BYBIT_MAINNET] CLOSED {side} {symbol} @ {exit_price:.4f} | "
                 f"{reason} | PnL ${pnl_usd:+.2f} ({pnl_pct:+.2f}%) | hold {hold_minutes:.0f}m"
             )
+            
+            # Send close notification
+            try:
+                from notifications.telegram_notifier import send_close_trade
+                await send_close_trade({
+                    "symbol": symbol,
+                    "side": side,
+                    "exit_price": exit_price,
+                    "pnl_usd": pnl_usd,
+                    "pnl_pct": pnl_pct,
+                    "hold_minutes": hold_minutes,
+                    "reason": reason,
+                    "normalized_reason": reason,
+                })
+            except Exception as notif_err:
+                logger.warning(f"[BYBIT_MAINNET] Close notification failed: {notif_err}")
         
         except Exception as e:
             logger.exception(f"[BYBIT_MAINNET] Close {symbol} failed: {e}")
