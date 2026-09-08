@@ -483,7 +483,9 @@ class BybitMainnetTrader:
                         "locked_profit": False,
                         "metadata": {"imported": True}
                     }
-                    self._save_positions()
+            
+            # Always save to update journal timestamp (for shadow watchdog)
+            self._save_positions()
         
         except Exception as e:
             logger.error(f"[BYBIT_MAINNET] Position sync failed: {e}")
