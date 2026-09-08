@@ -128,13 +128,18 @@ class BybitMainnetTrader:
         positions_file = self.journal_path / "open_positions.json"
         try:
             # Load existing positions from other exchanges
-            existing = []
+            existing = {}
             if positions_file.exists():
-                all_positions = json.loads(positions_file.read_text())
-                existing = [p for p in all_positions if p.get("exchange") != "bybit"]
+                data = json.loads(positions_file.read_text())
+                # Handle both dict and list formats
+                if isinstance(data, dict):
+                    existing = {k: v for k, v in data.items() if v.get("exchange") != "bybit"}
+                else:
+                    # Convert list to dict
+                    existing = {p["symbol"]: p for p in data if p.get("exchange") != "bybit"}
             
-            # Add our positions
-            all_positions = existing + list(self.positions.values())
+            # Merge our positions
+            all_positions = {**existing, **self.positions}
             
             # Write atomically
             tmp_file = positions_file.with_suffix(".tmp")
