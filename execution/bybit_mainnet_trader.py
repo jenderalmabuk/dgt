@@ -608,6 +608,13 @@ class BybitMainnetTrader:
             # Send close notification (simple format)
             try:
                 from notifications.telegram_notifier import send_close_trade
+                
+                # Get current balance for notification
+                try:
+                    balance = self.client.get_balance()
+                except:
+                    balance = 0
+                
                 await send_close_trade({
                     "symbol": symbol,
                     "side": side,
@@ -617,9 +624,11 @@ class BybitMainnetTrader:
                     "hold_minutes": hold_minutes,
                     "reason": reason,
                     "normalized_reason": reason,
+                    "balance_after": balance,
+                    "equity": balance,
                 })
             except Exception as notif_err:
-                logger.warning(f"[BYBIT_MAINNET] Close notification failed: {notif_err}")
+                logger.exception(f"[BYBIT_MAINNET] Close notification failed: {notif_err}")
         
         except Exception as e:
             err_str = str(e)
