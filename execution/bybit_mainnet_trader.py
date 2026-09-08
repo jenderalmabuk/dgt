@@ -75,7 +75,11 @@ class BybitMainnetTrader:
         if positions_file.exists():
             try:
                 data = json.loads(positions_file.read_text())
-                self.positions = {p["symbol"]: p for p in data if p.get("exchange") == "bybit"}
+                # Handle both dict (symbol->position) and list formats
+                if isinstance(data, dict):
+                    self.positions = {k: v for k, v in data.items() if v.get("exchange") == "bybit"}
+                else:
+                    self.positions = {p["symbol"]: p for p in data if p.get("exchange") == "bybit"}
                 logger.info(f"[BYBIT_MAINNET] Loaded {len(self.positions)} positions from journal")
             except Exception as e:
                 logger.error(f"[BYBIT_MAINNET] Failed to load positions: {e}")
