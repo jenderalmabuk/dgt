@@ -115,6 +115,10 @@ async def lifespan(app: FastAPI):
         result = start()
         if asyncio.iscoroutine(result):
             task = asyncio.create_task(result)
+    # Also start run_maintenance_loop if it exists (Bybit trader)
+    elif hasattr(_gateway.trader, "run_maintenance_loop"):
+        task = asyncio.create_task(_gateway.trader.run_maintenance_loop())
+        logger.info("[GATEWAY] started trader.run_maintenance_loop()")
     logger.info("[GATEWAY] up — single execution point ready on /gateway")
     yield
     stop = getattr(_gateway.trader, "stop", None)
@@ -124,6 +128,10 @@ async def lifespan(app: FastAPI):
             await result
     if task:
         task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 class _GatewayProxy:
