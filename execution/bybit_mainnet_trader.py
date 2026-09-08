@@ -726,6 +726,7 @@ class BybitMainnetTrader:
                 logger.info("[BYBIT_MAINNET] Migrated existing positions for TP ladder")
             
             # Fetch exchange positions
+            exchange_positions = self.client.get_positions()
             
             # Map exchange positions
             exchange_map = {
