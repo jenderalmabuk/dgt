@@ -805,6 +805,14 @@ class BybitMainnetTrader:
             if not pos.get("locked_profit"):
                 continue
             
+            # Get fresh mark price for this symbol
+            try:
+                quote = self._get_fresh_close_quote(symbol)
+                mark = quote["mark_price"]
+            except Exception as e:
+                logger.warning(f"[TRAILING_LOCK] {symbol} failed to get mark price: {e}")
+                continue
+            
             side = pos["side"]
             entry = pos["entry_price"]
             sl = pos.get("sl_price", 0)
@@ -812,8 +820,8 @@ class BybitMainnetTrader:
             
             # Track high/low watermark
             if "high_watermark" not in pos:
-                pos["high_watermark"] = mark if side == "LONG" else mark
-                pos["low_watermark"] = mark if side == "SHORT" else mark
+                pos["high_watermark"] = mark
+                pos["low_watermark"] = mark
             
             # Update watermarks
             if side == "LONG":
