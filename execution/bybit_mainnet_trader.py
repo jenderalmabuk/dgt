@@ -69,6 +69,44 @@ class BybitMainnetTrader:
             return default
         return val in ("1", "true", "yes", "on")
     
+    async def _get_fresh_open_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Fresh Bybit quote with receipt-time provenance.
+        
+        Returns dict with price, source, timestamp, freshness flag.
+        Gateway uses this for price validation before entry.
+        """
+        try:
+            ticker = self.client.get_ticker(symbol)
+            if ticker and "lastPrice" in ticker:
+                price = float(ticker["lastPrice"])
+                if price > 0:
+                    return {
+                        "price": price,
+                        "price_source": "bybit_usdt_perp",
+                        "price_observed_at": datetime.now(timezone.utc).isoformat(),
+                        "price_age_sec": 0.0,
+                        "price_fresh": True
+                    }
+        except Exception as e:
+            logger.warning(f"[BYBIT_MAINNET] Fresh open price fetch failed {symbol}: {e}")
+        return None
+    
+    async def _get_fresh_open_price(self, symbol: str) -> tuple[float, str]:
+        """Get fresh open price for entry execution."""
+        quote = await self._get_fresh_open_quote(symbol)
+        if quote:
+            return (float(quote["price"]), str(quote["price_source"]))
+        return (0.0, "fresh_price_unavailable")
+    
+    @staticmethod
+    def _lifecycle_price(quote: Dict[str, Any]) -> Optional[float]:
+        """Return only fresh multi-exchange lifecycle truth."""
+        if not isinstance(quote, dict) or quote.get("price_fresh") is not True:
+            return None
+        price = float(quote.get("price") or 0)
+        return price if price > 0 else None
+    
     def _load_positions(self):
         """Load open positions from journal."""
         positions_file = self.journal_path / "open_positions.json"
