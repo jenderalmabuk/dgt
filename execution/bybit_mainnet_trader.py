@@ -800,7 +800,74 @@ class BybitMainnetTrader:
                         logger.error(f"[PROFIT_LOCK] {symbol} failed to update SL: {e}")
         
         # LAYER 4: TRAILING (adaptive trailing after lock)
-        # TODO: Implement trailing logic (complex, defer for now)
+        # Activate after 1.5R profit, trail 0.6R from peak (shadow proven config)
+        for symbol, pos in list(self.positions.items()):
+            if not pos.get("locked_profit"):
+                continue
+            
+            side = pos["side"]
+            entry = pos["entry_price"]
+            sl = pos.get("sl_price", 0)
+            risk_distance = abs(entry - sl) if sl else abs(entry * 0.01)
+            
+            # Track high/low watermark
+            if "high_watermark" not in pos:
+                pos["high_watermark"] = mark if side == "LONG" else mark
+                pos["low_watermark"] = mark if side == "SHORT" else mark
+            
+            # Update watermarks
+            if side == "LONG":
+                pos["high_watermark"] = max(pos["high_watermark"], mark)
+                peak = pos["high_watermark"]
+            else:
+                pos["low_watermark"] = min(pos["low_watermark"], mark)
+                peak = pos["low_watermark"]
+            
+            # Calculate profit in R
+            if side == "LONG":
+                profit_r = (mark - entry) / risk_distance if risk_distance else 0
+            else:
+                profit_r = (entry - mark) / risk_distance if risk_distance else 0
+            
+            # Trailing activation threshold: 1.5R
+            if profit_r < 1.5:
+                continue
+            
+            # Calculate trailing SL: peak - 0.6R
+            trail_distance = risk_distance * 0.6
+            
+            if side == "LONG":
+                trailing_sl = peak - trail_distance
+                # Only move SL up (never down)
+                if trailing_sl > sl:
+                    new_sl = trailing_sl
+                else:
+                    continue
+            else:
+                trailing_sl = peak + trail_distance
+                # Only move SL down (never up)
+                if trailing_sl < sl:
+                    new_sl = trailing_sl
+                else:
+                    continue
+            
+            # Update SL on exchange
+            try:
+                self.client.set_trading_stop(
+                    symbol=symbol,
+                    stop_loss=self._quantize(new_sl, 0.01)
+                )
+                
+                pos["sl_price"] = new_sl
+                pos["sl_kind"] = "TRAILING"
+                self._save_positions()
+                
+                logger.info(
+                    f"[TRAILING_LOCK] {symbol} {side} | SL {sl:.4f} → {new_sl:.4f} | "
+                    f"peak={peak:.4f} trail_dist={trail_distance:.4f} profit={profit_r:.2f}R"
+                )
+            except Exception as e:
+                logger.error(f"[TRAILING_LOCK] {symbol} failed to update SL: {e}")
         
         return False
     
