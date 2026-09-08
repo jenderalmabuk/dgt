@@ -138,6 +138,7 @@ class BybitClient:
         position_idx: int = 0,
         take_profit: str = None,
         stop_loss: str = None,
+        reduce_only: bool = False,
         order_link_id: str = None,
         category: str = "linear"
     ) -> Dict[str, Any]:
@@ -151,6 +152,9 @@ class BybitClient:
             "timeInForce": time_in_force,
             "positionIdx": position_idx
         }
+        
+        if reduce_only:
+            params["reduceOnly"] = True
         
         if price:
             params["price"] = price
