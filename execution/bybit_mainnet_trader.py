@@ -910,7 +910,16 @@ class BybitMainnetTrader:
                     f"peak={peak:.4f} trail_dist={trail_distance:.4f} profit={profit_r:.2f}R"
                 )
             except Exception as e:
-                logger.error(f"[TRAILING_LOCK] {symbol} failed to update SL: {e}")
+                err_str = str(e)
+                # Suppress expected errors (cosmetic only)
+                if "34040" in err_str or "not modified" in err_str:
+                    # SL already at correct value - OK
+                    continue
+                elif "10001" in err_str and "zero position" in err_str:
+                    # Position closed externally - will be cleaned up on next sync
+                    continue
+                else:
+                    logger.error(f"[TRAILING_LOCK] {symbol} failed to update SL: {e}")
         
         return False
     
