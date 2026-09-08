@@ -347,18 +347,23 @@ class BybitMainnetTrader:
                 f"qty={qty_str} | SL={sl_price:.6f} | TP1={tp_prices[0]:.6f}"
             )
             
-            # Send entry notification
+            # Send entry notification (rich format)
             try:
-                from notifications.telegram_notifier import send_open_trade
-                await send_open_trade({
+                from signal_copy.telegram_formatter import build_execution_message
+                from signal_copy.telegram_transport import send_trades_notification
+                
+                msg = build_execution_message({
                     "symbol": symbol,
                     "side": side,
                     "entry_price": entry_price,
                     "sl_price": sl_price,
-                    "tp1": tp_prices[0] if tp_prices else None,
+                    "tp_prices": tp_prices,
                     "notional": notional,
-                    "qty": qty_str,
+                    "qty": float(qty_str),
+                    "status": "MARKET_FILL",
+                    "exchange": "bybit",
                 })
+                await send_trades_notification(msg)
             except Exception as notif_err:
                 logger.warning(f"[BYBIT_MAINNET] Notification failed: {notif_err}")
             
@@ -569,19 +574,24 @@ class BybitMainnetTrader:
                 f"{reason} | PnL ${pnl_usd:+.2f} ({pnl_pct:+.2f}%) | hold {hold_minutes:.0f}m"
             )
             
-            # Send close notification
+            # Send close notification (rich format)
             try:
-                from notifications.telegram_notifier import send_close_trade
-                await send_close_trade({
+                from signal_copy.telegram_formatter import build_close_message
+                from signal_copy.telegram_transport import send_trades_notification
+                
+                msg = build_close_message({
                     "symbol": symbol,
                     "side": side,
                     "exit_price": exit_price,
-                    "pnl_usd": pnl_usd,
+                    "pnl_amount": pnl_usd,
                     "pnl_pct": pnl_pct,
                     "hold_minutes": hold_minutes,
                     "reason": reason,
                     "normalized_reason": reason,
+                    "sl_kind": sl_kind if sl_kind else "NONE",
+                    "exchange": "bybit",
                 })
+                await send_trades_notification(msg)
             except Exception as notif_err:
                 logger.warning(f"[BYBIT_MAINNET] Close notification failed: {notif_err}")
         
