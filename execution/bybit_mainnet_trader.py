@@ -561,51 +561,79 @@ class BybitMainnetTrader:
             return
         
         try:
-            # Get current price if not provided
+            side = pos["side"]
+            entry_price = pos["entry_price"]
+            original_qty = float(pos.get("qty", 0))
+            
+            # Use provided qty or default to remaining/full
+            if close_qty is None:
+                close_qty = pos.get("qty_remaining", original_qty)
+            
+            # Get exit price
             if exit_price is None:
                 quote = await self._fetch_fresh_quote(symbol)
                 if quote:
                     exit_price = quote["mark"]
                 else:
                     logger.warning(f"[BYBIT_MAINNET] {symbol} no quote for close, using entry")
-                    exit_price = pos["entry_price"]
+                    exit_price = entry_price
             
-            # Calculate PnL
-            qty = float(pos["qty"])
-            entry = pos["entry_price"]
-            side = pos["side"]
-            
-            if side == "LONG":
-                pnl_usd = qty * (exit_price - entry)
-            else:
-                pnl_usd = qty * (entry - exit_price)
-            
-            pnl_pct = (pnl_usd / (qty * entry)) * 100
-            
-            # Close position on exchange
+            # Close on exchange
             bybit_side = "Sell" if side == "LONG" else "Buy"
             
-            close_result = self.client.create_order(
-                symbol=symbol,
-                side=bybit_side,
-                order_type="Market",
-                qty=pos["qty"],
-                reduce_only=True,
-                order_link_id=f"SC_CLOSE_{symbol}_{int(time.time() * 1000)}"
-            )
+            try:
+                # Quantize close qty
+                instrument = self.client.get_instrument_info(symbol)
+                lot_size = float(instrument["lotSizeFilter"]["qtyStep"])
+                close_qty_str = self._quantize(close_qty, lot_size)
+                
+                self.client.create_order(
+                    symbol=symbol,
+                    side=bybit_side,
+                    order_type="Market",
+                    qty=close_qty_str,
+                    reduce_only=True,
+                    order_link_id=f"SC_CLOSE_{symbol}_{int(time.time() * 1000)}"
+                )
+            except Exception as e:
+                err_str = str(e)
+                # Suppress expected errors
+                if "110017" in err_str and "zero position" in err_str:
+                    logger.info(f"[BYBIT_MAINNET] {symbol} already closed externally")
+                    self.positions.pop(symbol, None)
+                    self._save_positions()
+                    return
+                elif "34040" in err_str and "not modified" in err_str:
+                    logger.debug(f"[BYBIT_MAINNET] {symbol} close order not modified")
+                    return
+                else:
+                    logger.error(f"[BYBIT_MAINNET] Failed to close {symbol}: {e}")
+                    return
             
-            # Log close
-            now = datetime.now(timezone.utc)
+            # Calculate PnL for this partial close
+            if side == "LONG":
+                pnl_usd = (exit_price - entry_price) * close_qty
+            else:
+                pnl_usd = (entry_price - exit_price) * close_qty
+            
+            pnl_pct = (pnl_usd / (entry_price * close_qty)) * 100 if close_qty > 0 else 0
+            
+            # Calculate hold time
             opened_at = datetime.fromisoformat(pos["opened_at"].replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
             hold_minutes = (now - opened_at).total_seconds() / 60
             
+            # Determine if full close or partial
+            is_final = full_close or (qty_remaining is not None and qty_remaining <= original_qty * 0.05)
+            
+            # Save trade history
             trade = {
                 "symbol": symbol,
                 "exchange": "bybit",
                 "side": side,
-                "entry_price": entry,
+                "entry_price": entry_price,
                 "exit_price": exit_price,
-                "qty": pos["qty"],
+                "qty": close_qty,
                 "pnl_usd": round(pnl_usd, 2),
                 "pnl_pct": round(pnl_pct, 2),
                 "close_reason": reason,
@@ -613,21 +641,34 @@ class BybitMainnetTrader:
                 "opened_at": pos["opened_at"],
                 "closed_at": now.isoformat(),
                 "hold_minutes": round(hold_minutes, 1),
+                "partial": not is_final,
+                "qty_original": original_qty,
+                "qty_closed": close_qty,
+                "qty_remaining": qty_remaining if not is_final else 0,
                 "metadata": pos.get("metadata", {})
             }
             
             self._append_history(trade)
             
-            # Remove from positions
-            self.positions.pop(symbol, None)
+            # If final close, remove from positions
+            if is_final:
+                self.positions.pop(symbol, None)
+                logger.info(
+                    f"[BYBIT_MAINNET] CLOSED (FINAL) {side} {symbol} @ {exit_price:.4f} | "
+                    f"{reason} | PnL ${pnl_usd:+.2f} ({pnl_pct:+.2f}%) | hold {hold_minutes:.0f}m"
+                )
+            else:
+                # Update remaining quantity
+                pos["qty_remaining"] = qty_remaining
+                logger.info(
+                    f"[BYBIT_MAINNET] CLOSED (PARTIAL) {side} {symbol} @ {exit_price:.4f} | "
+                    f"{reason} | PnL ${pnl_usd:+.2f} ({pnl_pct:+.2f}%) | "
+                    f"Closed: {close_qty:.4f} ({(close_qty/original_qty)*100:.0f}%) | Remaining: {qty_remaining:.4f}"
+                )
+            
             self._save_positions()
             
-            logger.info(
-                f"[BYBIT_MAINNET] CLOSED {side} {symbol} @ {exit_price:.4f} | "
-                f"{reason} | PnL ${pnl_usd:+.2f} ({pnl_pct:+.2f}%) | hold {hold_minutes:.0f}m"
-            )
-            
-            # Send close notification (simple format)
+            # Send close notification
             try:
                 from notifications.telegram_notifier import send_close_trade
                 
@@ -637,6 +678,12 @@ class BybitMainnetTrader:
                 except:
                     balance = 0
                 
+                # Format reason with partial indicator
+                notification_reason = reason
+                if not is_final:
+                    percentage = int((close_qty / original_qty) * 100)
+                    notification_reason = f"{reason} ({percentage}% partial)"
+                
                 await send_close_trade({
                     "symbol": symbol,
                     "side": side,
@@ -644,8 +691,8 @@ class BybitMainnetTrader:
                     "pnl_usd": pnl_usd,
                     "pnl_pct": pnl_pct,
                     "hold_minutes": hold_minutes,
-                    "reason": reason,
-                    "normalized_reason": reason,
+                    "reason": notification_reason,
+                    "normalized_reason": notification_reason,
                     "balance_after": balance,
                     "equity": balance,
                 })
