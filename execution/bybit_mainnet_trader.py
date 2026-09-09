@@ -1035,10 +1035,15 @@ class BybitMainnetTrader:
                     
                     # Update SL on exchange
                     try:
-                        self.client.set_trading_stop(
+                        result = self.client.set_trading_stop(
                             symbol=symbol,
-                            stop_loss=self._quantize(new_sl, 0.01)  # TODO: use real tick size
+                            position_idx=0,  # Required for one-way mode
+                            stop_loss=self._quantize(new_sl, 0.01)
                         )
+                        
+                        # Verify API success
+                        if not result or result.get('retCode', 0) != 0:
+                            raise Exception(f"API returned error: {result}")
                         
                         pos["sl_price"] = new_sl
                         pos["sl_kind"] = "BREAKEVEN"
