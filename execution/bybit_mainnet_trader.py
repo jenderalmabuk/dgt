@@ -325,14 +325,34 @@ class BybitMainnetTrader:
             sl_str = self._quantize(sl_price, tick_size)
             tp1_str = self._quantize(tp_prices[0], tick_size) if tp_prices else None
             
-            # Determine order type (market vs limit)
+            # Determine order type (market vs pending based on entry zone)
             quote = await self._fetch_fresh_quote(symbol)
             if not quote:
                 logger.error(f"[BYBIT_MAINNET] {symbol} no quote available")
                 return False
             
             mark = quote["mark"]
-            order_type = "Market"  # Start with market for simplicity
+            
+            # Calculate entry zone (0.1R threshold)
+            risk = abs(entry_price - sl_price)
+            distance_from_entry = abs(mark - entry_price)
+            distance_in_R = distance_from_entry / risk if risk > 0 else 0
+            
+            # Entry zone logic: < 0.1R = market, >= 0.1R = pending
+            if distance_in_R < 0.1:
+                order_type = "Market"
+                actual_entry = mark  # Will fill at current price
+                logger.info(
+                    f"[BYBIT_MAINNET] {symbol} inside entry zone "
+                    f"({distance_in_R:.2f}R) → MARKET order"
+                )
+            else:
+                order_type = "Limit"
+                actual_entry = entry_price  # Pending at signal entry
+                logger.info(
+                    f"[BYBIT_MAINNET] {symbol} outside entry zone "
+                    f"({distance_in_R:.2f}R) → PENDING limit @ {entry_price:.6f}"
+                )
             
             # Place order
             bybit_side = "Buy" if side == "LONG" else "Sell"
@@ -354,7 +374,17 @@ class BybitMainnetTrader:
                 logger.error(f"[BYBIT_MAINNET] {symbol} order failed: {order_result}")
                 return False
             
-            # Store position
+            # For pending orders, store in pending tracking (will move to positions when filled)
+            if order_type == "Limit":
+                logger.info(
+                    f"[BYBIT_MAINNET] PENDING {side} {symbol} @ {entry_price:.6f} | "
+                    f"order_id={order_id} | Will check fill status in maintenance loop"
+                )
+                # Note: Bybit will auto-fill and we'll detect via sync_positions()
+                # For now, just log - no need to track separately
+                return True
+            
+            # Store position (market orders fill immediately)
             now = datetime.now(timezone.utc)
             position = {
                 "symbol": symbol,
