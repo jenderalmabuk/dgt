@@ -364,7 +364,7 @@ class BybitMainnetTrader:
                 qty=qty_str,
                 price=entry_str if order_type == "Limit" else None,
                 stop_loss=sl_str,
-                take_profit=tp1_str,
+                take_profit=None,  # Don't set TP - bot will close partial manually via TP ladder
                 order_link_id=f"SC_{symbol}_{int(time.time() * 1000)}"
             )
             
@@ -767,11 +767,63 @@ class BybitMainnetTrader:
             # Check for missing positions (closed externally)
             for symbol in list(self.positions.keys()):
                 if symbol not in exchange_map:
+                    pos = self.positions[symbol]
                     logger.info(
                         f"[BYBIT_MAINNET] {symbol} closed externally, "
-                        f"removing from local state"
+                        f"sending notification and removing from local state"
                     )
-                    # Just remove from local state (already closed on exchange)
+                    
+                    # Send close notification for external close
+                    try:
+                        from notifications.telegram_notifier import send_close_trade
+                        
+                        # Get entry price and calculate approximate PnL
+                        entry_price = float(pos.get("entry_price", 0))
+                        side = pos.get("side", "LONG")
+                        qty = float(pos.get("qty", 0))
+                        
+                        # Fetch last known price as exit estimate
+                        try:
+                            quote = await self._fetch_fresh_quote(symbol)
+                            exit_price = quote["mark"] if quote else entry_price
+                        except:
+                            exit_price = entry_price
+                        
+                        # Calculate PnL
+                        if side == "LONG":
+                            pnl_usd = (exit_price - entry_price) * qty
+                        else:
+                            pnl_usd = (entry_price - exit_price) * qty
+                        
+                        pnl_pct = (pnl_usd / (entry_price * qty)) * 100 if qty > 0 else 0
+                        
+                        # Calculate hold time
+                        opened_at = datetime.fromisoformat(pos["opened_at"].replace("Z", "+00:00"))
+                        now = datetime.now(timezone.utc)
+                        hold_minutes = (now - opened_at).total_seconds() / 60
+                        
+                        # Get balance
+                        try:
+                            balance = self.client.get_balance()
+                        except:
+                            balance = 0
+                        
+                        await send_close_trade({
+                            "symbol": symbol,
+                            "side": side,
+                            "exit_price": exit_price,
+                            "pnl_usd": round(pnl_usd, 2),
+                            "pnl_pct": round(pnl_pct, 2),
+                            "hold_minutes": round(hold_minutes, 1),
+                            "reason": "EXTERNAL_CLOSE (TP/SL hit on exchange)",
+                            "normalized_reason": "EXTERNAL_CLOSE",
+                            "balance_after": balance,
+                        })
+                        logger.info(f"[BYBIT_MAINNET] {symbol} external close notification sent")
+                    except Exception as e:
+                        logger.error(f"[BYBIT_MAINNET] {symbol} notification failed: {e}")
+                    
+                    # Remove from local state (already closed on exchange)
                     self.positions.pop(symbol, None)
             
             # Check for new positions (opened externally)

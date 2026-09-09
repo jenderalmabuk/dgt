@@ -47,6 +47,7 @@ class GatewayResult:
     risk_amount: float = 0.0
     trader_response: Optional[Dict[str, Any]] = field(default=None)
     risk_details: Optional[Dict[str, Any]] = field(default=None)
+    position_confirmed: bool = False  # Add field for orchestrator compatibility
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -211,6 +212,7 @@ class ExecutionGateway:
 
         res.ok = True
         res.reason = "opened"
+        res.position_confirmed = True  # Signal orchestrator that position was confirmed
         res.trader_response = opened if isinstance(opened, dict) else {"raw": str(opened)}
         logger.info("[GATEWAY] OPENED %s src=%s %s notional=%.2f risk=%.2f intent=%s",
                     symbol, intent.source, side, notional, risk_amount, intent.intent_id)
