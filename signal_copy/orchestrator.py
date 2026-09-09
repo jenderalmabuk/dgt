@@ -922,19 +922,22 @@ class SignalCopyOrchestrator:
                 "quadrant": metrics.get("quadrant") or "UNKNOWN",
             })
             
-            # Send execution outcome via Telegram trades bot (fallback to parser bot)
-            from signal_copy.telegram_transport import send_trades_notification
-            from signal_copy.telegram_formatter import build_execution_message
-            execution_msg = build_execution_message(outcome, pc.result.signal, pc.result)
-            try:
-                await send_trades_notification(execution_msg)
-            except Exception as exc:
-                logger.error(f"❌ Telegram trades notify failed: {exc}")
+            # NOTE: Bybit trader already sends entry notification via send_open_trade()
+            # No need to send duplicate [TRADES] notification here
+            # Left commented for reference in case we need it for debugging
             
-            return execution_msg
+            # from signal_copy.telegram_transport import send_trades_notification
+            # from signal_copy.telegram_formatter import build_execution_message
+            # execution_msg = build_execution_message(outcome, pc.result.signal, pc.result)
+            # try:
+            #     await send_trades_notification(execution_msg)
+            # except Exception as exc:
+            #     logger.error(f"❌ Telegram trades notify failed: {exc}")
+            
+            return "OK"  # Execution successful, notification sent by trader
         
         # Failed execution: the parser card already said VALID; send the final
-        # execution verdict too so users can see why no position opened.
+        # execution verdict so users can see why no position opened.
         from signal_copy.telegram_transport import send_trades_notification
         from signal_copy.telegram_formatter import build_execution_message
         execution_msg = build_execution_message(outcome, pc.result.signal, pc.result)
