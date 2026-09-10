@@ -197,6 +197,38 @@ class BybitClient:
         result = self._request("/v5/order/realtime", params=params, private=True)
         return result.get("list", [])
     
+    def get_order_history(
+        self,
+        symbol: str = None,
+        order_id: str = None,
+        order_link_id: str = None,
+        category: str = "linear",
+        limit: int = 20
+    ) -> list:
+        """Get order history (filled/cancelled orders).
+        
+        Args:
+            symbol: Filter by symbol
+            order_id: Filter by order ID
+            order_link_id: Filter by order link ID
+            category: linear/spot/inverse
+            limit: Max orders to return (default 20, max 50)
+        
+        Returns:
+            List of order dicts with fill info
+        """
+        params = {"category": category, "limit": limit}
+        
+        if symbol:
+            params["symbol"] = symbol
+        if order_id:
+            params["orderId"] = order_id
+        if order_link_id:
+            params["orderLinkId"] = order_link_id
+        
+        result = self._request("/v5/order/history", params=params, private=True)
+        return result.get("list", [])
+    
     def get_positions(self, symbol: str = None, category: str = "linear") -> list:
         """Get current positions."""
         params = {"category": category, "settleCoin": "USDT"}

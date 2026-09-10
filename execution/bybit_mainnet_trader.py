@@ -617,14 +617,49 @@ class BybitMainnetTrader:
                 lot_size = float(instrument["lotSizeFilter"]["qtyStep"])
                 close_qty_str = self._quantize(close_qty, lot_size)
                 
-                self.client.create_order(
+                # Create order with unique link ID to fetch fill later
+                order_link_id = f"SC_CLOSE_{symbol}_{int(time.time() * 1000)}"
+                
+                order_result = self.client.create_order(
                     symbol=symbol,
                     side=bybit_side,
                     order_type="Market",
                     qty=close_qty_str,
                     reduce_only=True,
-                    order_link_id=f"SC_CLOSE_{symbol}_{int(time.time() * 1000)}"
+                    order_link_id=order_link_id
                 )
+                
+                # Wait briefly for order to fill
+                await asyncio.sleep(1.5)
+                
+                # Fetch actual fill price from order history
+                actual_fill_price = None
+                try:
+                    order_history = self.client.get_order_history(
+                        symbol=symbol,
+                        order_link_id=order_link_id,
+                        limit=1
+                    )
+                    
+                    if order_history and len(order_history) > 0:
+                        order = order_history[0]
+                        # avgPrice is the actual fill price
+                        avg_price_str = order.get("avgPrice", "0")
+                        if avg_price_str and avg_price_str != "0" and avg_price_str != "":
+                            actual_fill_price = float(avg_price_str)
+                            logger.info(
+                                f"[BYBIT_MAINNET] {symbol} actual fill: {actual_fill_price:.6f} "
+                                f"(expected: {exit_price:.6f})"
+                            )
+                except Exception as fetch_err:
+                    logger.warning(
+                        f"[BYBIT_MAINNET] {symbol} could not fetch actual fill: {fetch_err}"
+                    )
+                
+                # Use actual fill if available, otherwise use mark price estimate
+                if actual_fill_price:
+                    exit_price = actual_fill_price
+                    
             except Exception as e:
                 err_str = str(e)
                 # Suppress expected errors
@@ -641,12 +676,24 @@ class BybitMainnetTrader:
                     return
             
             # Calculate PnL for this partial close
+            # Use actual fill price (already updated above if fetch succeeded)
             if side == "LONG":
-                pnl_usd = (exit_price - entry_price) * close_qty
+                gross_pnl = (exit_price - entry_price) * close_qty
             else:
-                pnl_usd = (entry_price - exit_price) * close_qty
+                gross_pnl = (entry_price - exit_price) * close_qty
             
-            pnl_pct = (pnl_usd / (entry_price * close_qty)) * 100 if close_qty > 0 else 0
+            # Estimate trading fees (Bybit taker: ~0.055% per side)
+            # Entry fee + Exit fee = ~0.11% total round-trip
+            entry_notional = entry_price * close_qty
+            exit_notional = exit_price * close_qty
+            estimated_entry_fee = entry_notional * 0.00055  # 0.055% taker
+            estimated_exit_fee = exit_notional * 0.00055    # 0.055% taker
+            total_fees = estimated_entry_fee + estimated_exit_fee
+            
+            # Net PnL after fees
+            pnl_usd = gross_pnl - total_fees
+            
+            pnl_pct = (pnl_usd / entry_notional) * 100 if entry_notional > 0 else 0
             
             # Calculate hold time
             opened_at = datetime.fromisoformat(pos["opened_at"].replace("Z", "+00:00"))
