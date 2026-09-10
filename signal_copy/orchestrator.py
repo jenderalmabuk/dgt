@@ -892,7 +892,9 @@ class SignalCopyOrchestrator:
             reason=outcome.reason,
             gateway_response=getattr(outcome, "raw", None),
         )
-        if position_confirmed and outcome.notional > 0:
+        if position_confirmed:
+            # Position confirmed by gateway - execution successful
+            # Bybit trader already sent entry notification via send_open_trade()
             # Build rich execution message for trades channel
             exec_payload = {
                 "symbol": outcome.symbol,

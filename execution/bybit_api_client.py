@@ -224,6 +224,7 @@ class BybitClient:
         if order_id:
             params["orderId"] = order_id
         if order_link_id:
+            # Bybit V5 uses snake_case for query parameters
             params["orderLinkId"] = order_link_id
         
         result = self._request("/v5/order/history", params=params, private=True)

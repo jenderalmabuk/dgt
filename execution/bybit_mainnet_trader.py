@@ -633,24 +633,36 @@ class BybitMainnetTrader:
                 await asyncio.sleep(1.5)
                 
                 # Fetch actual fill price from order history
+                # NOTE: Bybit /v5/order/history GET request fails signature validation
+                # when orderLinkId parameter is included (API bug/limitation).
+                # Workaround: fetch recent orders by symbol, then filter by orderLinkId
                 actual_fill_price = None
                 try:
                     order_history = self.client.get_order_history(
                         symbol=symbol,
-                        order_link_id=order_link_id,
-                        limit=1
+                        limit=10  # Get recent orders, filter locally
                     )
                     
-                    if order_history and len(order_history) > 0:
-                        order = order_history[0]
+                    # Find our order by orderLinkId
+                    matching_order = None
+                    for order in order_history:
+                        if order.get("orderLinkId") == order_link_id:
+                            matching_order = order
+                            break
+                    
+                    if matching_order:
                         # avgPrice is the actual fill price
-                        avg_price_str = order.get("avgPrice", "0")
+                        avg_price_str = matching_order.get("avgPrice", "0")
                         if avg_price_str and avg_price_str != "0" and avg_price_str != "":
                             actual_fill_price = float(avg_price_str)
                             logger.info(
                                 f"[BYBIT_MAINNET] {symbol} actual fill: {actual_fill_price:.6f} "
                                 f"(expected: {exit_price:.6f})"
                             )
+                    else:
+                        logger.warning(
+                            f"[BYBIT_MAINNET] {symbol} order {order_link_id} not found in recent history"
+                        )
                 except Exception as fetch_err:
                     logger.warning(
                         f"[BYBIT_MAINNET] {symbol} could not fetch actual fill: {fetch_err}"
