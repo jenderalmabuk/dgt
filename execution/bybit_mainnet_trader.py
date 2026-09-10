@@ -1054,26 +1054,68 @@ class BybitMainnetTrader:
                             f"[PROFIT_LOCK] {symbol} locked! SL moved {sl:.4f} → {new_sl:.4f}"
                         )
                     except Exception as e:
-                        logger.error(f"[PROFIT_LOCK] {symbol} failed to update SL: {e}")
+                        err_str = str(e)
+                        
+                        # Error 34040 = "not modified" - SL may already be close to target
+                        if "34040" in err_str and "not modified" in err_str:
+                            # Fetch current SL from exchange to verify
+                            try:
+                                exchange_positions = self.client.get_positions()
+                                exchange_map = {p["symbol"]: p for p in exchange_positions}
+                                if symbol in exchange_map:
+                                    current_sl = float(exchange_map[symbol].get("stopLoss", 0))
+                                    # If SL is already at/above breakeven, consider it locked
+                                    if abs(current_sl - new_sl) < risk_distance * 0.1:  # Within 10% of risk
+                                        logger.info(
+                                            f"[PROFIT_LOCK] {symbol} already locked (SL={current_sl:.4f}, target={new_sl:.4f})"
+                                        )
+                                        pos["sl_price"] = current_sl
+                                        pos["sl_kind"] = "BREAKEVEN"
+                                        pos["locked_profit"] = True
+                                        self._save_positions()
+                                    else:
+                                        logger.warning(
+                                            f"[PROFIT_LOCK] {symbol} error 34040 but SL not at target (current={current_sl:.4f}, target={new_sl:.4f})"
+                                        )
+                            except Exception as verify_err:
+                                logger.error(f"[PROFIT_LOCK] {symbol} failed to verify SL: {verify_err}")
+                        else:
+                            logger.error(f"[PROFIT_LOCK] {symbol} failed to update SL: {e}")
         
         # LAYER 4: TRAILING (adaptive trailing after lock)
         # Activate after 1.5R profit, trail 0.6R from peak (shadow proven config)
+        # NOTE: Trailing should work independently of PROFIT_LOCK success
+        # Trigger: profit >= 1.5R OR TP1+ hit
         for symbol, pos in list(self.positions.items()):
-            if not pos.get("locked_profit"):
-                continue
+            # Skip if not enough profit/TP yet
+            # Allow trailing if: (1) PROFIT_LOCK succeeded, OR (2) TP1+ hit, OR (3) 1.5R+ profit
+            tp_hit_count = len(pos.get("tp_hit", []))
             
             # Get fresh mark price for this symbol
             try:
                 quote = await self._get_fresh_close_quote(symbol)
                 mark = quote["mark_price"]
             except Exception as e:
-                logger.warning(f"[TRAILING_LOCK] {symbol} failed to get mark price: {e}")
+                logger.warning(f"[TRAILING] {symbol} failed to get mark price: {e}")
                 continue
             
             side = pos["side"]
             entry = pos["entry_price"]
             sl = pos.get("sl_price", 0)
             risk_distance = abs(entry - sl) if sl else abs(entry * 0.01)
+            
+            # Calculate profit in R
+            if side == "LONG":
+                profit_r = (mark - entry) / risk_distance if risk_distance else 0
+            else:
+                profit_r = (entry - mark) / risk_distance if risk_distance else 0
+            
+            # Trailing activation: locked_profit=true OR tp_hit>=1 OR profit>=1.5R
+            locked = pos.get("locked_profit", False)
+            can_trail = locked or tp_hit_count >= 1 or profit_r >= 1.5
+            
+            if not can_trail:
+                continue
             
             # Track high/low watermark (initialize with current mark if missing)
             if "high_watermark" not in pos:
