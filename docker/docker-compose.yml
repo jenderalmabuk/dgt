@@ -840,34 +840,25 @@ services:
       - nexus_net
       - docker_default
 
-  fusionnew_m30_btc_corr:
+  dgt_momentum_paper:
     image: nexus-bot:latest
-    container_name: nexus_fusionnew_m30_btc_corr
+    container_name: nexus_dgt_momentum_paper
+    command: ["python", "-u", "bots/dgt_momentum_paper.py"]
     environment:
-      BOT_NAME: m30_fusionnew_btc_corr
-      SL_FLOOR_PCT: "2.5"
-      NEAREST_MAX_AGE: "480"
-      BTC_REGIME_STRONG_PCT: "0.75"
-      LTF_OVERRIDE: "3m"
       PYTHONUNBUFFERED: "1"
       NEXUS_API_URL: http://fastapi:8000
-      STATE_DIR: /state
-      HEARTBEAT_DIR: /state
-      TELEGRAM_BOT_TOKEN: ${FUSIONNEW_TELEGRAM_BOT_TOKEN}
+      STATE_DIR: /app/runtime/dgt_momentum
+      HEARTBEAT_DIR: /app/runtime/dgt_momentum
+      REVO_RUNTIME_DIR: /app/runtime/revo
+      FUSIONNEW_TELEGRAM_BOT_TOKEN: ${FUSIONNEW_TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
-      WHALE_RUNTIME_DIR: /app/runtime/whales
-      LOG_DIR: /tmp
-      NINE_ROUTER_API_KEY: ${NINE_ROUTER_API_KEY}
-      NINE_ROUTER_BASE: ${NINE_ROUTER_BASE:-http://host.docker.internal:20128/v1}
-      ADVERSARIAL_MODEL: ${ADVERSARIAL_MODEL:-Free-Tiers}
-      ADVERSARIAL_MODEL_FALLBACK: ${ADVERSARIAL_MODEL_FALLBACK:-cerebras/gpt-oss-120b}
+      PAPER_BALANCE: "1000.0"
+      RISK_PCT: "0.01"
+      SCAN_INTERVAL_SEC: "60"
     volumes:
       - ..:/app
-      - ../runtime/fusionnew:/state
-      - ../runtime/logs:/logs
-      - ../runtime/whales:/app/runtime/whales
+      - ../runtime/dgt_momentum:/app/runtime/dgt_momentum
       - ../runtime/revo:/app/runtime/revo:ro
-      - ../bots/config.yaml:/app/bots/config.yaml:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -878,6 +869,7 @@ services:
     networks:
       - nexus_net
       - docker_default
+
 
 
 networks:
