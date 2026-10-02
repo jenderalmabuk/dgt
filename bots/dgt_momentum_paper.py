@@ -95,7 +95,14 @@ class DGTMomentumBot:
                 self.balance = float(data.get("balance", INITIAL_BALANCE))
                 self.pending_orders = data.get("pending_orders", {})
                 self.open_positions = data.get("open_positions", {})
-                self.closed_trades = data.get("closed_trades", [])
+                if TRADES_FILE.exists():
+                    try:
+                        with open(TRADES_FILE) as tf:
+                            self.closed_trades = [json.loads(line) for line in tf if line.strip()]
+                    except Exception:
+                        self.closed_trades = data.get("closed_trades", [])
+                else:
+                    self.closed_trades = data.get("closed_trades", [])
                 logger.info(f"Loaded state: Balance=${self.balance:.2f}, Open={len(self.open_positions)}, Orders={len(self.pending_orders)}, Closed={len(self.closed_trades)}")
             except Exception as e:
                 logger.error(f"Error loading state file: {e}")
@@ -378,7 +385,7 @@ class DGTMomentumBot:
                 fee = rem_size * close_px * TAKER_FEE
                 
                 net_trade_pnl = pos["realized_pnl"] + pnl_portion - fee
-                self.balance += (rem_size * close_px) + net_trade_pnl
+                self.balance += (pnl_portion - fee)
                 
                 r_ret = net_trade_pnl / pos["risk_usd"]
                 status = "WIN" if net_trade_pnl > 0 else ("BE" if pos["hit_tp1"] else "LOSS")
@@ -413,6 +420,7 @@ class DGTMomentumBot:
                 fee = closed_size * close_px * MAKER_FEE
                 
                 pos["realized_pnl"] += (pnl_portion - fee)
+                self.balance += (pnl_portion - fee)
                 pos["rem_ratio"] -= close_ratio
                 pos["cur_sl"] = entry # MOVE SL TO BREAKEVEN!
                 
@@ -454,7 +462,7 @@ class DGTMomentumBot:
                     fee = rem_size * close_px * MAKER_FEE
                     net_trade_pnl = pos["realized_pnl"] + pnl_portion - fee
                     
-                    self.balance += (rem_size * close_px) + net_trade_pnl
+                    self.balance += (pnl_portion - fee)
                     r_ret = net_trade_pnl / pos["risk_usd"]
                     
                     logger.info(f"🏆 [FULL TP2] {symbol} closed remaining at +2.5R | Total PnL: ${net_trade_pnl:.2f} ({r_ret:+.2f}R)")
@@ -486,7 +494,7 @@ class DGTMomentumBot:
                     pnl_portion = rem_size * (close_px - entry)
                     fee = rem_size * close_px * TAKER_FEE
                     net_trade_pnl = pos["realized_pnl"] + pnl_portion - fee
-                    self.balance += (rem_size * close_px) + net_trade_pnl
+                    self.balance += (pnl_portion - fee)
                     r_ret = net_trade_pnl / pos["risk_usd"]
                     
                     logger.info(f"🚦 [RED LIGHT EMERGENCY EXIT] {symbol} volume spike! Climax exit @ {close_px:.4f} | PnL: ${net_trade_pnl:.2f}")
@@ -520,7 +528,7 @@ class DGTMomentumBot:
                     pnl_portion = rem_size * (close_px - entry)
                     fee = rem_size * close_px * MAKER_FEE
                     net_trade_pnl = pos["realized_pnl"] + pnl_portion - fee
-                    self.balance += (rem_size * close_px) + net_trade_pnl
+                    self.balance += (pnl_portion - fee)
                     r_ret = net_trade_pnl / pos["risk_usd"]
                     
                     logger.info(f"🚀 [TP3 MAX HIT] {symbol} reached +3.5R max target! Total PnL: ${net_trade_pnl:.2f}")
@@ -549,7 +557,7 @@ class DGTMomentumBot:
                 pnl_portion = rem_size * (close_px - entry)
                 fee = rem_size * close_px * TAKER_FEE
                 net_trade_pnl = pos["realized_pnl"] + pnl_portion - fee
-                self.balance += (rem_size * close_px) + net_trade_pnl
+                self.balance += (pnl_portion - fee)
                 r_ret = net_trade_pnl / pos["risk_usd"]
                 
                 pos["exit_px"] = close_px
