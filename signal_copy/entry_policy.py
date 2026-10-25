@@ -43,7 +43,21 @@ def _rr_ladder(sig, entry: float) -> list[float]:
 
 
 def pending_fill_allowed(sig, price: float, max_drift_r: float = 0.10) -> tuple[bool, float]:
-    """Allow triggered pending market fill only near its active boundary."""
+    """Allow triggered pending market fill only near its active boundary.
+    
+    Regime-aware thresholds:
+    - TRENDING: 0.25R (fast momentum, need speed)
+    - SCALP: 0.15R (quick entry window)
+    - RANGING/SWING: 0.10R (default, patient entry OK)
+    """
+    # Regime-specific threshold override
+    regime = getattr(sig, "regime", "").lower()
+    if regime == "trending":
+        max_drift_r = 0.25
+    elif regime == "scalp":
+        max_drift_r = 0.15
+    # else: use default 0.10
+    
     boundary = float(getattr(sig, "active_entry", None) or (sig.entry_low if price < sig.entry_low else sig.entry_high))
     risk = abs(boundary - float(sig.stop_loss or 0.0))
     drift_r = abs(float(price) - boundary) / risk if risk > 0 else float("inf")

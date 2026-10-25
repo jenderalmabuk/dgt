@@ -1,0 +1,100 @@
+[
+  {
+    "id": -1001958121663,
+    "name": "CEX Alerts",
+    "username": "@cexalerts",
+    "tier": "TIER_1_LISTING",
+    "reason": "Notifikasi listing instan di Binance, Bybit, Coinbase, Upbit, OKX."
+  },
+  {
+    "id": -1003580182256,
+    "name": "Hyperliquid Announcements",
+    "username": "@hyperliquld_announcements",
+    "tier": "TIER_1_LISTING",
+    "reason": "Pengumuman listing & ekspansi DEX perp terbesar saat ini."
+  },
+  {
+    "id": -1003404241089,
+    "name": "Top Crypto Gainer Alert",
+    "username": "@top_crypto_gainer_alert",
+    "tier": "TIER_2_MOMENTUM",
+    "reason": "Deteksi koin yang sedang breakout/gainer tercepat di market."
+  },
+  {
+    "id": -1001553109986,
+    "name": "Lookonchain",
+    "username": "@lookonchain",
+    "tier": "TIER_1_WHALE",
+    "reason": "Pelacak transaksi dompet paus, smart money, dan institusi paling kredibel."
+  },
+  {
+    "id": -1001309043988,
+    "name": "Whale Alert",
+    "username": "@whale_alert_io",
+    "tier": "TIER_1_WHALE",
+    "reason": "Alert perpindahan crypto masif (CEX deposit/withdrawal besar)."
+  },
+  {
+    "id": -1001246846205,
+    "name": "CryptoQuant Alert",
+    "username": "@cryptoquant_alert",
+    "tier": "TIER_1_WHALE",
+    "reason": "Metrik cadangan bursa, leverage ratio, dan arus dana on-chain."
+  },
+  {
+    "id": -1001470176706,
+    "name": "Whale Hunter (CoinTrendz)",
+    "username": "@cointrendz_whalehunter",
+    "tier": "TIER_2_WHALE",
+    "reason": "Deteksi order buy/sell besar secara real-time."
+  },
+  {
+    "id": -1001252741288,
+    "name": "ICO Analytics",
+    "username": "@ico_analytic",
+    "tier": "TIER_1_RESEARCH",
+    "reason": "Data token unlock, funding putaran baru, dan narasi altcoin mendatang."
+  },
+  {
+    "id": -1001161683441,
+    "name": "Global Crypto Research",
+    "username": "@official_gcr",
+    "tier": "TIER_1_RESEARCH",
+    "reason": "Analisis fundamental dan riset makro institusional."
+  },
+  {
+    "id": -1001652601224,
+    "name": "Crypto World Updates",
+    "username": "@cryptoworld17379",
+    "tier": "TIER_2_NEWS",
+    "reason": "Agregator berita kripto breaking news 24 jam."
+  },
+  {
+    "id": -1001078354109,
+    "name": "The Discipline Desk",
+    "username": "@tddmarkets",
+    "tier": "TIER_2_NEWS",
+    "reason": "Rangkuman sentimen pasar dan ringkasan sesi trading global."
+  },
+  {
+    "id": -1001553432571,
+    "name": "SM News",
+    "username": "@sm_news_24h",
+    "tier": "TIER_2_NEWS",
+    "reason": "Berita kilat regulasi, ETF, dan breaking crypto updates."
+  },
+  {
+    "id": -1002014991433,
+    "name": "Ash Crypto",
+    "username": "@ashcryptotg",
+    "tier": "TIER_3_INFLUENCER",
+    "reason": "Sentimen retail dan opini pasar yang diikuti jutaan trader."
+  },
+  {
+    "id": -1001553551852,
+    "name": "Binance 360",
+    "username": "@binance_360",
+    "tier": "TIER_2_NEWS",
+    "reason": "Kompilasi berita seputar ekosistem Binance & BSC."
+  }
+]

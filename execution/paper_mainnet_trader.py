@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import aiohttp
 from signal_copy.fresh_quote import fetch_fresh_quote
+from execution.smart_scratch_exit import calculate_smart_scratch_timeout
 
 # Trailing stop execution config
 TRAILING_EXECUTION_ENABLED = os.getenv("TRAILING_EXECUTION_ENABLED", "false").lower() in ("1", "true", "yes")
@@ -1097,7 +1098,7 @@ class PaperMainnetTrader:
                 await asyncio.sleep(self.poll_interval)
                 for symbol in list(self.positions.keys()):
                     pos = self.positions.get(symbol)
-                    if not pos or pos["status"] != "OPEN":
+                    if not pos or pos.get("status", "OPEN") != "OPEN":
                         continue
                     
                     quote = await fetch_fresh_quote(symbol)
@@ -1270,6 +1271,7 @@ class PaperMainnetTrader:
         """
         if not self._dyn_enabled():
             return False
+        
         if pos.get("status") != "OPEN" or float(pos.get("qty") or 0) <= 0:
             return False
 
@@ -1285,9 +1287,13 @@ class PaperMainnetTrader:
             try:
                 opened = datetime.fromisoformat(opened.replace("Z", "+00:00"))
             except ValueError:
-                opened = None
+                return False
         if not isinstance(opened, datetime):
             return False
+        
+        # Audit heartbeat (INFO level during audit period)
+        opened_str = opened.strftime('%m-%d %H:%M') if isinstance(opened, datetime) else str(opened)[:16]
+        logger.info(f"[DYN_EXIT_CHECK] {symbol} {side} opened {opened_str}")
         
         # EPOCH GUARD: exclude pre-epoch positions (no valid dynamic-exit snapshot)
         DYNAMIC_EXIT_EPOCH = datetime(2026, 9, 6, 12, 43, 0, tzinfo=UTC)
@@ -1303,15 +1309,31 @@ class PaperMainnetTrader:
         unrealized = ((mark - entry) / entry) if side == "LONG" else ((entry - mark) / entry)
 
         # ── 1. SCRATCH_EXIT — kill zombie trades near breakeven ─────────────
-        # Old bot: pre-TP1 only; regime-specific wait; |PnL| under threshold.
-        if _dyn_env_bool("SCRATCH_EXIT_ENABLED") and pos.get("tp1_hit") is not True:
-            regime = str(pos.get("regime") or "RANGING").upper()
-            scratch_min = (_dyn_env_float("SCRATCH_EXIT_RANGING_MINUTES", 30.0) if regime == "RANGING"
-                           else _dyn_env_float("SCRATCH_EXIT_TRENDING_MINUTES", 45.0))
+        if self._config_bool("SCRATCH_EXIT_ENABLED", default=True):
+            # Smart scratch: adaptive timeout based on TF, regime, trend
+            enable_smart = os.getenv("SMART_SCRATCH_ENABLED", "true").lower() == "true"
+            phase1_4h_only = os.getenv("SMART_SCRATCH_PHASE1_4H_ONLY", "false").lower() == "true"  # Phase 2: false
+            
+            # Channel-specific timeframe defaults
+            channel_config = {
+                "-1001519663114": "1d",      # jelly
+                "-1002053675871": "15m",     # naorist
+                "-1002128890109": "1h",      # raydium
+                "-1003801941007": "15m",     # Data's Inner Circle 👑
+            }
+            
+            scratch_min = calculate_smart_scratch_timeout(
+                position=pos,
+                channel_config=channel_config,
+                enable_smart=enable_smart,
+                phase1_4h_only=phase1_4h_only
+            )
+            
             max_abs = _dyn_env_float("SCRATCH_EXIT_MAX_ABS_PNL_PCT", 0.4)
             if hold_min >= scratch_min and abs(unrealized * 100.0) < max_abs:
                 pos["dynamic_exit_layer"] = {"layer": "SCRATCH_EXIT", "hold_min": hold_min,
                                              "unrealized_pct": unrealized * 100.0,
+                                             "scratch_timeout_min": scratch_min,
                                              "at": now.isoformat(), "mark": mark}
                 await self._close(symbol, mark, "SCRATCH_EXIT")
                 return True
@@ -1333,10 +1355,12 @@ class PaperMainnetTrader:
                     return True
 
         # ── 3. PROFIT_LOCK — move SL to breakeven+buffer once in profit ─────
+        # TP1-GATED: Only lock after TP1 hit to avoid premature locks from volatility spikes
         # Buffer = max(entry*BUFFER_PCT/100, risk_distance*0.15) — old bot exact.
+        tp_hit_count = len(pos.get("tp_hit", []))
         if (not pos.get("locked_profit")
                 and hold_min > _dyn_env_int("PROFIT_LOCK_MIN_MINUTES", 15)
-                and unrealized > _dyn_env_float("PROFIT_LOCK_TRIGGER_PCT", 1.0) / 100.0):
+                and tp_hit_count >= 1):  # ✅ TP1-gated: confirmed profit only
             original_sl = float(pos.get("provider_sl_original") or sl or entry)
             risk_distance = abs(entry - original_sl)
             fixed_buffer = entry * (_dyn_env_float("PROFIT_LOCK_BUFFER_PCT", 0.3) / 100.0)

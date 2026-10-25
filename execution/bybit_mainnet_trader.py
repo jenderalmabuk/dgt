@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict, Optional, Any
 
 from execution.bybit_api_client import BybitClient, BybitAPIError
+from execution.smart_scratch_exit import calculate_smart_scratch_timeout
 
 
 logger = logging.getLogger(__name__)
@@ -386,6 +387,12 @@ class BybitMainnetTrader:
             
             # Store position (market orders fill immediately)
             now = datetime.now(timezone.utc)
+            
+            # Calculate initial risk for blended R tracking
+            initial_qty = float(qty_str)
+            risk_distance = abs(entry_price - sl_price)
+            risk_usd = initial_qty * risk_distance
+            
             position = {
                 "symbol": symbol,
                 "exchange": "bybit",
@@ -396,6 +403,9 @@ class BybitMainnetTrader:
                 "tp_hit": [],  # Track which TPs have been hit
                 "qty": qty_str,
                 "qty_remaining": float(qty_str),  # Track remaining position size
+                "initial_qty": initial_qty,  # Store initial qty for R calculation
+                "risk_usd": risk_usd,  # Store initial risk for blended R
+                "realized_pnl_usd": 0.0,  # Accumulate PnL from partial closes
                 "notional": notional,
                 "order_id": order_id,
                 "opened_at": now.isoformat(),
@@ -706,6 +716,14 @@ class BybitMainnetTrader:
             pnl_usd = gross_pnl - total_fees
             
             pnl_pct = (pnl_usd / entry_notional) * 100 if entry_notional > 0 else 0
+            
+            # Update realized PnL for blended R calculation
+            if not full_close:
+                pos["realized_pnl_usd"] = pos.get("realized_pnl_usd", 0.0) + pnl_usd
+                logger.info(
+                    f"[BYBIT_MAINNET] {symbol} realized PnL updated: "
+                    f"${pos['realized_pnl_usd']:.2f} (this close: ${pnl_usd:.2f})"
+                )
             
             # Calculate hold time
             opened_at = datetime.fromisoformat(pos["opened_at"].replace("Z", "+00:00"))
@@ -1051,11 +1069,33 @@ class BybitMainnetTrader:
         
         # LAYER 1: SCRATCH_EXIT (kill zombies)
         if self._config_bool("SCRATCH_EXIT_ENABLED", default=True):
-            scratch_min = float(os.getenv("SCRATCH_EXIT_MIN_HOLD_MINUTES", "45"))
+            # Smart scratch: adaptive timeout based on TF, regime, trend
+            enable_smart = os.getenv("SMART_SCRATCH_ENABLED", "true").lower() == "true"
+            phase1_4h_only = os.getenv("SMART_SCRATCH_PHASE1_4H_ONLY", "false").lower() == "true"  # Phase 2: false
+            
+            # Channel-specific timeframe defaults
+            channel_config = {
+                "-1001519663114": "1d",      # jelly
+                "-1002053675871": "15m",     # naorist
+                "-1002128890109": "1h",      # raydium
+                "-1003801941007": "15m",     # Data's Inner Circle 👑
+            }
+            
+            scratch_min = calculate_smart_scratch_timeout(
+                position=pos,
+                channel_config=channel_config,
+                enable_smart=enable_smart,
+                phase1_4h_only=phase1_4h_only
+            )
+            
             scratch_max_abs_pnl = float(os.getenv("SCRATCH_EXIT_MAX_ABS_PNL_PCT", "0.4"))
             
             if hold_minutes >= scratch_min and abs(unrealized_pct) <= scratch_max_abs_pnl:
-                logger.info(f"[SCRATCH_EXIT] {symbol} stagnant near BE")
+                logger.info(
+                    f"[SCRATCH_EXIT] {symbol} stagnant near BE "
+                    f"(hold: {hold_minutes:.0f}min >= {scratch_min:.0f}min, "
+                    f"pnl: {unrealized_pct:+.2f}% <= {scratch_max_abs_pnl}%)"
+                )
                 await self._close(symbol, "SCRATCH_EXIT", sl_kind=pos.get("sl_kind", "ORIGINAL"), exit_price=mark)
                 return True
         
@@ -1070,13 +1110,16 @@ class BybitMainnetTrader:
                 return True
         
         # LAYER 3: PROFIT_LOCK (move SL to BE+buffer)
+        # GATE: Only lock after TP1 hit to avoid premature locks from volatility spikes
         if self._config_bool("PROFIT_LOCK_ENABLED", default=True):
             if not pos.get("locked_profit", False):
                 lock_min = float(os.getenv("PROFIT_LOCK_MIN_MINUTES", "15"))
-                lock_trigger = float(os.getenv("PROFIT_LOCK_TRIGGER_PCT", "1.0"))
                 lock_buffer = float(os.getenv("PROFIT_LOCK_BUFFER_PCT", "0.3"))
                 
-                if hold_minutes >= lock_min and unrealized_pct >= lock_trigger:
+                # TP1-gated: only lock after at least one TP hit (confirmed profit)
+                tp_hit_count = len(pos.get("tp_hit", []))
+                
+                if hold_minutes >= lock_min and tp_hit_count >= 1:
                     # Calculate new SL (breakeven + buffer)
                     sl = pos.get("sl_price", 0)
                     risk_distance = abs(entry - sl)

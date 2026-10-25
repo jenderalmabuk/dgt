@@ -77,3 +77,7 @@ logs/
 *.swp
 *.swo
 *~
+.tmp
+PROFIT_LOCK_FIX_PLAN.md
+test_*.py
+scripts/*.bak

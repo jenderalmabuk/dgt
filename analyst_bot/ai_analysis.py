@@ -44,7 +44,10 @@ EVIDENCE='''+json.dumps(evidence,default=str,separators=(',',':'))
  body=json.dumps({'model':MODEL,'messages':[{'role':'system','content':'Report facts only. Never invent evidence.'},{'role':'user','content':prompt}],
                   'temperature':0,'max_tokens':900}).encode()
  req=urllib.request.Request(BASE+'/chat/completions',data=body,headers={'Authorization':'Bearer '+KEY,'Content-Type':'application/json'})
- with urllib.request.urlopen(req,timeout=90) as r:data=json.load(r)
+ with urllib.request.urlopen(req,timeout=90) as r:
+  raw=r.read().decode('utf-8',errors='replace').strip()
+ if raw.startswith('data:'):raw=raw.split('data:',1)[1].strip()
+ data,_=json.JSONDecoder().raw_decode(raw)
  text=data['choices'][0]['message']['content'].strip()
  return f"{evidence['symbol']} · AI CONFLUENCE REVIEW\nModel: {MODEL}\n\n{text}\n\nLLM hanya merangkum evidence; bukan perintah transaksi."
 

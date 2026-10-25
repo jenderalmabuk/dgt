@@ -47,6 +47,25 @@ from .conviction_sizer import ConvictionSizer
 # from .vip_reporter import VIPSessionReporter  # TODO: wire VIP feature later
 
 
+# Curated Intelligence & Sentiment Radar Channels (News, Whale Alert, Listings)
+RADAR_CHANNEL_IDS = {
+    -1001958121663,  # CEX Alerts
+    -1003580182256,  # Hyperliquid Announcements
+    -1003404241089,  # Top Crypto Gainer Alert
+    -1001553109986,  # Lookonchain
+    -1001309043988,  # Whale Alert
+    -1001246846205,  # CryptoQuant Alert
+    -1001470176706,  # Whale Hunter (CoinTrendz)
+    -1001252741288,  # ICO Analytics
+    -1001161683441,  # Global Crypto Research
+    -1001652601224,  # Crypto World Updates
+    -1001078354109,  # The Discipline Desk
+    -1001553432571,  # SM News
+    -1002014991433,  # Ash Crypto
+    -1001553551852,  # Binance 360
+}
+
+
 def _f(v, d=0.0) -> float:
     try:
         return float(v)
@@ -402,6 +421,21 @@ class SignalCopyOrchestrator:
         source: SignalSource = SignalSource.TELEGRAM,
         image: Optional[bytes] = None,
     ) -> None:
+        # Tap into sentiment radar feed for curated news / whale / listing channels
+        if source_chat_id is not None and source_chat_id in RADAR_CHANNEL_IDS:
+            try:
+                import json as _json
+                rf_item = {
+                    "timestamp": time.time(),
+                    "source_id": source_chat_id,
+                    "source_name": source_name,
+                    "text": text,
+                }
+                with open("/state/radar_telegram_feed.jsonl", "a", encoding="utf-8") as _rf:
+                    _rf.write(_json.dumps(rf_item, ensure_ascii=False) + "\n")
+            except Exception as _rfe:
+                logger.debug(f"Failed to record telegram radar post: {_rfe}")
+
         # Never parse messages that originate from our own bot/components.
         if source_chat_id is not None and source_chat_id in self.ignore_chat_ids:
             return
