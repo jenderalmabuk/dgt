@@ -122,6 +122,112 @@ def get_symbol_whale_flow(symbol: str, max_age_minutes: int = 30) -> Optional[Di
         return None
 
 
+# ── Shadow CVD & 30d Taker Flow Accumulation Audit (rebalancedbot integration) ──
+_cvd_cache: Dict[str, Dict[str, Any]] = {}
+
+def get_symbol_shadow_cvd(symbol: str, ttl_sec: int = 600) -> Dict[str, Any]:
+    """Fetch 30-day klines from Binance Futures and calculate Shadow CVD & Momentum.
+    Caches results in memory for ttl_sec (default 10 minutes).
+    Fallback to Bybit / Exempt if unlisted on Binance Futures.
+    """
+    clean = symbol.upper()
+    now_ts = time.time()
+
+    cached = _cvd_cache.get(clean)
+    if cached and (now_ts - cached.get("cached_at", 0)) < ttl_sec:
+        return cached["data"]
+
+    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={clean}&interval=1d&limit=31"
+    try:
+        r = requests.get(url, headers={"User-Agent": "dgt-shadow/1.0"}, timeout=5)
+        if r.status_code == 400:
+            res = {
+                "status": "EXEMPT",
+                "source": "bybit_only",
+                "symbol": clean,
+                "verdict": "EXEMPT_BYBIT_ONLY",
+                "cvd_7d": None,
+                "cvd_30d": None,
+                "mom_30d": None,
+            }
+        elif r.status_code == 200:
+            data = r.json()
+            if not data or len(data) < 5:
+                res = {
+                    "status": "EXEMPT",
+                    "source": "binance_fapi",
+                    "symbol": clean,
+                    "verdict": "EXEMPT_SHORT_HISTORY",
+                    "cvd_7d": None,
+                    "cvd_30d": None,
+                    "mom_30d": None,
+                }
+            else:
+                flow_30 = [2.0 * float(bar[9]) - float(bar[5]) for bar in data]
+                cvd_30 = sum(flow_30) / (sum(abs(f) for f in flow_30) + 1e-9)
+
+                flow_7 = flow_30[-7:]
+                cvd_7 = sum(flow_7) / (sum(abs(f) for f in flow_7) + 1e-9)
+
+                mom_30 = float(data[-1][4]) / float(data[0][4]) - 1.0
+
+                if cvd_7 >= 0.05 or (cvd_30 >= 0.05 and cvd_7 >= -0.10):
+                    verdict = "ACCUMULATION"
+                elif cvd_7 <= -0.30 or (cvd_30 <= -0.30 and cvd_7 < 0):
+                    verdict = "DISTRIBUTION"
+                else:
+                    verdict = "NEUTRAL"
+
+                res = {
+                    "status": "ACTIVE",
+                    "source": "binance_fapi",
+                    "symbol": clean,
+                    "verdict": verdict,
+                    "cvd_7d": round(cvd_7, 4),
+                    "cvd_30d": round(cvd_30, 4),
+                    "mom_30d": round(mom_30, 4),
+                }
+        else:
+            res = {
+                "status": "ERROR",
+                "source": "binance_fapi",
+                "symbol": clean,
+                "verdict": "BYPASS_HTTP_ERROR",
+                "cvd_7d": None,
+                "cvd_30d": None,
+                "mom_30d": None,
+            }
+    except Exception as e:
+        logger.debug(f"Failed to fetch shadow CVD for {clean}: {e}")
+        res = {
+            "status": "ERROR",
+            "source": "binance_fapi",
+            "symbol": clean,
+            "verdict": "BYPASS_EXCEPTION",
+            "cvd_7d": None,
+            "cvd_30d": None,
+            "mom_30d": None,
+        }
+
+    _cvd_cache[clean] = {"data": res, "cached_at": now_ts}
+    return res
+
+
+def format_shadow_cvd_badge(pos: Dict[str, Any]) -> str:
+    """Format short summary badge of Shadow CVD audit for trade exit reports."""
+    s_cvd = pos.get("shadow_cvd") or {}
+    verdict = s_cvd.get("verdict", "")
+    if verdict == "ACCUMULATION":
+        return "\n🛡️ <b>Shadow CVD:</b> PASS ✅ [Whale Accumulation]"
+    elif verdict == "DISTRIBUTION":
+        return "\n⚠️ <b>Shadow CVD:</b> WOULD BE BLOCKED ❌ [Heavy Net Dump]"
+    elif verdict == "NEUTRAL":
+        return "\n⚪ <b>Shadow CVD:</b> PASS ⚪ [Neutral Flow]"
+    elif "EXEMPT" in verdict:
+        return "\n🛡️ <b>Shadow CVD:</b> EXEMPT [Bybit Only / Unlisted]"
+    return ""
+
+
 # --- Pure Crypto Filtering (Exclude TradFi Stocks, Commodities & Dead Tokens) ---
 TRADFI_STOCKS = {
     "AAL", "AAOI", "AAPL", "ADBE", "AEHR", "AFRM", "ALAB", "AMC", "AMD", "AMDSTOCK",
@@ -437,6 +543,33 @@ class DGTMomentumBot:
             except Exception as e:
                 logger.debug(f"Whale flow check bypassed: {e}")
 
+            # ── 5. Shadow CVD & Taker Accumulation Audit (rebalancedbot integration) ──
+            shadow_cvd_info = None
+            shadow_cvd_badge = ""
+            try:
+                shadow_cvd_info = get_symbol_shadow_cvd(symbol)
+                if shadow_cvd_info:
+                    s_status = shadow_cvd_info.get("status")
+                    s_verdict = shadow_cvd_info.get("verdict", "NEUTRAL")
+                    s_c7 = shadow_cvd_info.get("cvd_7d")
+                    s_c30 = shadow_cvd_info.get("cvd_30d")
+                    s_m30 = shadow_cvd_info.get("mom_30d")
+
+                    if s_status == "EXEMPT":
+                        shadow_cvd_badge = "\n🛡️ <b>[Shadow CVD]:</b> Exempt (Bybit Only / Unlisted on Binance)"
+                    else:
+                        c7_s = f"{s_c7:+.2f}" if s_c7 is not None else "N/A"
+                        c30_s = f"{s_c30:+.2f}" if s_c30 is not None else "N/A"
+                        m30_s = f"{s_m30*100:+.1f}%" if s_m30 is not None else "N/A"
+                        if s_verdict == "ACCUMULATION":
+                            shadow_cvd_badge = f"\n🛡️ <b>[Shadow CVD]:</b> PASS ✅ Accumulation (7d: {c7_s}, 30d: {c30_s}, Mom: {m30_s})"
+                        elif s_verdict == "DISTRIBUTION":
+                            shadow_cvd_badge = f"\n⚠️ <b>[Shadow CVD]:</b> WOULD BE BLOCKED ❌ Net Dump (7d: {c7_s}, 30d: {c30_s}, Mom: {m30_s})"
+                        else:
+                            shadow_cvd_badge = f"\n⚪ <b>[Shadow CVD]:</b> PASS ⚪ Neutral (7d: {c7_s}, 30d: {c30_s}, Mom: {m30_s})"
+            except Exception as e:
+                logger.debug(f"Shadow CVD check bypassed: {e}")
+
             # Capital & Sizing (Risk 1% of current balance)
             risk_usd = self.balance * RISK_PCT
             pos_size = risk_usd / risk
@@ -467,6 +600,7 @@ class DGTMomentumBot:
                 "expires_at": expires_at,
                 "sentiment": sent_info,
                 "whale": whale_info,
+                "shadow_cvd": shadow_cvd_info,
                 "status": "PENDING",
             }
 
@@ -484,6 +618,7 @@ class DGTMomentumBot:
                     f"<b>Expiry:</b> 30 menit (6 bar)"
                     f"{sentiment_badge}"
                     f"{whale_badge}"
+                    f"{shadow_cvd_badge}"
                 )
                 self.save_state()
                 break
@@ -631,6 +766,7 @@ class DGTMomentumBot:
                     exit_reason = "SL_OR_BEP"
                     title = f"🛑 <b>[DGT Momentum] Position Closed ({status})</b>"
                 
+                cvd_exit_badge = format_shadow_cvd_badge(pos)
                 logger.info(f"🛑 [CLOSED] {symbol} hit {exit_reason} @ {fmt_px(close_px)} | PnL: ${net_trade_pnl:.2f} ({r_ret:+.2f}R)")
                 send_telegram(
                     f"{title}\n"
@@ -638,6 +774,7 @@ class DGTMomentumBot:
                     f"<b>Exit Price:</b> {fmt_px(close_px)}\n"
                     f"<b>Net PnL:</b> ${net_trade_pnl:+.2f} ({r_ret:+.2f}R)\n"
                     f"<b>Account Balance:</b> ${self.balance:.2f}"
+                    f"{cvd_exit_badge}"
                 )
                 
                 pos["exit_px"] = close_px
@@ -706,6 +843,7 @@ class DGTMomentumBot:
                     self.balance += (pnl_portion - fee)
                     r_ret = net_trade_pnl / pos["risk_usd"]
                     
+                    cvd_exit_badge = format_shadow_cvd_badge(pos)
                     logger.info(f"🏆 [FULL TP2] {symbol} closed remaining at +2.5R | Total PnL: ${net_trade_pnl:.2f} ({r_ret:+.2f}R)")
                     send_telegram(
                         f"🏆 <b>[DGT Momentum] Full TP2 Target Hit!</b>\n"
@@ -713,6 +851,7 @@ class DGTMomentumBot:
                         f"<b>Exit Price:</b> {fmt_px(close_px)} (+2.5R)\n"
                         f"<b>Net PnL:</b> ${net_trade_pnl:+.2f} ({r_ret:+.2f}R)\n"
                         f"<b>Balance:</b> ${self.balance:.2f}"
+                        f"{cvd_exit_badge}"
                     )
                     
                     pos["exit_px"] = close_px
@@ -738,6 +877,7 @@ class DGTMomentumBot:
                     self.balance += (pnl_portion - fee)
                     r_ret = net_trade_pnl / pos["risk_usd"]
                     
+                    cvd_exit_badge = format_shadow_cvd_badge(pos)
                     logger.info(f"🚦 [RED LIGHT EMERGENCY EXIT] {symbol} volume spike! Climax exit @ {fmt_px(close_px)} | PnL: ${net_trade_pnl:.2f}")
                     send_telegram(
                         f"🚦 <b>[DGT Momentum] DGT Red Light Exhaustion!</b>\n"
@@ -745,6 +885,7 @@ class DGTMomentumBot:
                         f"<b>Warning:</b> Extreme volume spike detected. Emergency exit at top!\n"
                         f"<b>Exit Price:</b> {fmt_px(close_px)}\n"
                         f"<b>Total PnL:</b> ${net_trade_pnl:+.2f} ({r_ret:+.2f}R)"
+                        f"{cvd_exit_badge}"
                     )
                     pos["exit_px"] = close_px
                     pos["exit_time"] = datetime.now(timezone.utc).isoformat()
@@ -769,6 +910,7 @@ class DGTMomentumBot:
                     r_ret = net_trade_pnl / pos["risk_usd"]
 
                     w_val = float(whale_dump.get("value_usd", 0.0))
+                    cvd_exit_badge = format_shadow_cvd_badge(pos)
                     logger.info(f"🐋🛑 [WHALE CLIMAX EXIT] {symbol} hit by Ultra-Mega Sell (${w_val:,.0f})! Profit locked @ {fmt_px(close_px)} | PnL: ${net_trade_pnl:.2f}")
                     send_telegram(
                         f"🐋🛑 <b>[DGT Momentum] Whale Climax Exit!</b>\n"
@@ -777,6 +919,7 @@ class DGTMomentumBot:
                         f"<b>Action:</b> Posisi Runner langsung diamankan di pucuk.\n"
                         f"<b>Exit Price:</b> {fmt_px(close_px)}\n"
                         f"<b>Total PnL:</b> ${net_trade_pnl:+.2f} ({r_ret:+.2f}R)"
+                        f"{cvd_exit_badge}"
                     )
                     pos["exit_px"] = close_px
                     pos["exit_time"] = datetime.now(timezone.utc).isoformat()
@@ -844,6 +987,16 @@ class DGTMomentumBot:
                 self.balance += (pnl_portion - fee)
                 r_ret = net_trade_pnl / pos["risk_usd"]
                 
+                cvd_exit_badge = format_shadow_cvd_badge(pos)
+                logger.info(f"⏰ [TIMEOUT EXIT] {symbol} hit max hold 6h | PnL: ${net_trade_pnl:.2f} ({r_ret:+.2f}R)")
+                send_telegram(
+                    f"⏰ <b>[DGT Momentum] Max Hold Timeout (6h)</b>\n"
+                    f"<b>Pair:</b> #{symbol}\n"
+                    f"<b>Exit Price:</b> {fmt_px(close_px)}\n"
+                    f"<b>Total PnL:</b> ${net_trade_pnl:+.2f} ({r_ret:+.2f}R)\n"
+                    f"<b>Balance:</b> ${self.balance:.2f}"
+                    f"{cvd_exit_badge}"
+                )
                 pos["exit_px"] = close_px
                 pos["exit_time"] = datetime.now(timezone.utc).isoformat()
                 pos["net_pnl"] = net_trade_pnl
