@@ -308,6 +308,7 @@ class DGTMomentumBot:
             try:
                 data = json.loads(STATE_FILE.read_text())
                 self.balance = float(data.get("balance", INITIAL_BALANCE))
+                self.v2_baseline = float(data.get("v2_baseline_balance", self.balance))
                 self.pending_orders = data.get("pending_orders", {})
                 self.open_positions = data.get("open_positions", {})
                 if TRADES_FILE.exists():
@@ -318,7 +319,7 @@ class DGTMomentumBot:
                         self.closed_trades = data.get("closed_trades", [])
                 else:
                     self.closed_trades = data.get("closed_trades", [])
-                logger.info(f"Loaded state: Balance=${self.balance:.2f}, Open={len(self.open_positions)}, Orders={len(self.pending_orders)}, Closed={len(self.closed_trades)}")
+                logger.info(f"Loaded state: Balance=${self.balance:.2f} (V2 Baseline: ${self.v2_baseline:.2f}), Open={len(self.open_positions)}, Orders={len(self.pending_orders)}, Closed={len(self.closed_trades)}")
             except Exception as e:
                 logger.error(f"Error loading state file: {e}")
 
@@ -326,6 +327,7 @@ class DGTMomentumBot:
         try:
             data = {
                 "balance": round(self.balance, 2),
+                "v2_baseline_balance": round(getattr(self, "v2_baseline", self.balance), 2),
                 "pending_orders": self.pending_orders,
                 "open_positions": self.open_positions,
                 "total_trades": len(self.closed_trades),
