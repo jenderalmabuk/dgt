@@ -56,11 +56,15 @@ TELEGRAM_TOKEN = os.getenv("FUSIONNEW_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRA
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "578305627")
 INITIAL_BALANCE = float(os.getenv("PAPER_BALANCE", "1000.0"))
 RISK_PCT = float(os.getenv("RISK_PCT", "0.01"))  # 1% per trade ($10 on $1000)
-MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
-MAX_ORDERS = int(os.getenv("MAX_ORDERS", "25"))
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "3"))  # Max 3 concurrent positions
+MAX_ORDERS = int(os.getenv("MAX_ORDERS", "15"))
+MAX_NOTIONAL_PER_POS_MULT = float(os.getenv("MAX_NOTIONAL_PER_POS_MULT", "1.5"))  # Max 1.5x balance per trade
+MAX_PORTFOLIO_LEVERAGE = float(os.getenv("MAX_PORTFOLIO_LEVERAGE", "3.0"))        # Max 3.0x total portfolio exposure
+MAX_UNIVERSE = int(os.getenv("MAX_UNIVERSE", "200"))                             # Scan up to 200 crypto pairs
 SCAN_INTERVAL_SEC = int(os.getenv("SCAN_INTERVAL_SEC", "60"))
-MAKER_FEE = 0.0002  # 0.02% Bybit maker fee
-TAKER_FEE = 0.00055 # 0.055% Bybit taker fee
+MAKER_FEE = 0.0002   # 0.02% Bybit maker fee
+TAKER_FEE = 0.00055  # 0.055% Bybit taker fee
+SLIPPAGE_RATE = float(os.getenv("SLIPPAGE_RATE", "0.0005"))  # 0.05% (5 bps) slippage for market exit orders
 
 STATE_FILE = STATE_DIR / "dgt_momentum_state.json"
 TRADES_FILE = STATE_DIR / "dgt_momentum_trades.jsonl"
@@ -285,6 +289,18 @@ class DGTMomentumBot:
         self.open_positions: Dict[str, Dict[str, Any]] = {}
         self.closed_trades: List[Dict[str, Any]] = []
         self.last_candle_checked: Dict[str, str] = {}
+        self.funnel: Dict[str, int] = {
+            "scanned": 0,
+            "pass_trio": 0,
+            "blocked_sentiment": 0,
+            "blocked_whale": 0,
+            "blocked_cvd": 0,
+            "blocked_exposure": 0,
+            "orders_created": 0,
+            "orders_filled": 0,
+            "orders_runaway": 0,
+            "orders_expired": 0,
+        }
         self.load_state()
 
     def load_state(self) -> None:
@@ -342,6 +358,86 @@ class DGTMomentumBot:
         except Exception as e:
             logger.error(f"Error writing trade log: {e}")
 
+    def _partial_close(self, pos: Dict[str, Any], close_ratio: float, close_px: float, is_maker: bool = True) -> float:
+        closed_size = pos["pos_size"] * close_ratio
+        fee_rate = MAKER_FEE if is_maker else TAKER_FEE
+        fee = closed_size * close_px * fee_rate
+        pnl_portion = closed_size * (close_px - pos["entry_px"])
+
+        pos["gross_realized_pnl"] = pos.get("gross_realized_pnl", 0.0) + pnl_portion
+        pos["exit_fees"] = pos.get("exit_fees", 0.0) + fee
+        pos["total_fees"] = pos.get("total_fees", 0.0) + fee
+        self.balance += (pnl_portion - fee)
+        pos["rem_ratio"] -= close_ratio
+        return pnl_portion - fee
+
+    def _close_position(self, pos: Dict[str, Any], close_px: float, exit_reason: str, is_maker: bool = False) -> None:
+        symbol = pos["symbol"]
+        entry = pos["entry_px"]
+        rem_size = pos["pos_size"] * pos["rem_ratio"]
+
+        # Apply realistic slippage on market/emergency exits (non-maker)
+        slippage = (close_px * SLIPPAGE_RATE) if not is_maker else 0.0
+        exec_close_px = close_px - slippage if pos.get("side", "BUY") == "BUY" else close_px + slippage
+
+        fee_rate = MAKER_FEE if is_maker else TAKER_FEE
+        exit_fee = rem_size * exec_close_px * fee_rate
+        pnl_portion = rem_size * (exec_close_px - entry)
+
+        pos["gross_realized_pnl"] = pos.get("gross_realized_pnl", 0.0) + pnl_portion
+        pos["exit_fees"] = pos.get("exit_fees", 0.0) + exit_fee
+        pos["total_fees"] = pos.get("total_fees", 0.0) + exit_fee
+        pos["slippage_paid"] = pos.get("slippage_paid", 0.0) + (rem_size * slippage)
+
+        # Cash balance was already debited by entry_fee at fill. Now add remaining proceeds:
+        self.balance += (pnl_portion - exit_fee)
+
+        gross_trade_pnl = pos["gross_realized_pnl"]
+        total_fees = pos["total_fees"]
+        net_trade_pnl = gross_trade_pnl - total_fees
+        r_ret = net_trade_pnl / pos["risk_usd"]
+        status = "WIN" if net_trade_pnl > 0 else ("BE" if pos.get("hit_tp1") else "LOSS")
+
+        pos["exit_px"] = exec_close_px
+        pos["exit_time"] = datetime.now(timezone.utc).isoformat()
+        pos["gross_pnl"] = round(gross_trade_pnl, 4)
+        pos["entry_fee"] = round(pos.get("entry_fee", 0.0), 4)
+        pos["exit_fees"] = round(pos.get("exit_fees", 0.0), 4)
+        pos["total_fees"] = round(total_fees, 4)
+        pos["slippage_paid"] = round(pos.get("slippage_paid", 0.0), 4)
+        pos["net_pnl"] = round(net_trade_pnl, 4)
+        pos["net_r"] = round(r_ret, 2)
+        pos["status"] = status
+        pos["exit_reason"] = exit_reason
+
+        cvd_exit_badge = format_shadow_cvd_badge(pos)
+        logger.info(f"🛑 [CLOSED] {symbol} hit {exit_reason} @ {fmt_px(exec_close_px)} | Net: ${net_trade_pnl:+.2f} ({r_ret:+.2f}R) | Fees: ${total_fees:.2f}")
+
+        title_map = {
+            "MOONBAG_TRAILING": f"🏆 <b>[DGT Momentum] Moonbag Trailing Closed ({status})</b>",
+            "RUNNER_TRAILING": f"💰 <b>[DGT Momentum] Runner Trailing Closed ({status})</b>",
+            "SL_OR_BEP": f"🛑 <b>[DGT Momentum] Position Closed ({status})</b>",
+            "FULL_TP2": f"🏆 <b>[DGT Momentum] Full TP2 Target Hit!</b>",
+            "DGT_RED_LIGHT": f"🚦 <b>[DGT Momentum] DGT Red Light Exhaustion!</b>",
+            "WHALE_CLIMAX_EXIT": f"🐋🛑 <b>[DGT Momentum] Whale Climax Exit!</b>",
+            "MAX_HOLD_TIMEOUT": f"⏰ <b>[DGT Momentum] Max Hold Timeout (6h)</b>",
+        }
+        title = title_map.get(exit_reason, f"🛑 <b>[DGT Momentum] Trade Closed ({status})</b>")
+
+        send_telegram(
+            f"{title}\n"
+            f"<b>Pair:</b> #{symbol}\n"
+            f"<b>Exit Price:</b> {fmt_px(exec_close_px)}\n"
+            f"<b>Gross PnL:</b> ${gross_trade_pnl:+.2f}\n"
+            f"<b>Total Fees:</b> ${total_fees:.2f} (Entry: ${pos['entry_fee']:.2f}, Exit: ${pos['exit_fees']:.2f})\n"
+            f"<b>Net PnL:</b> ${net_trade_pnl:+.2f} ({r_ret:+.2f}R)\n"
+            f"<b>Account Balance:</b> ${self.balance:.2f}"
+            f"{cvd_exit_badge}"
+        )
+        self.log_closed_trade(pos)
+        del self.open_positions[symbol]
+        self.save_state()
+
     def get_universe(self) -> List[str]:
         """Load symbols scanned by nexus_scanner from runtime/revo, filtered for pure crypto."""
         candidates = [
@@ -368,7 +464,7 @@ class DGTMomentumBot:
                         sym = line.strip().replace("/", "").replace(":USDT", "")
                         if sym and is_crypto_pair(sym) and sym not in symbols:
                             symbols.append(sym)
-                if len(symbols) >= 50:
+                if len(symbols) >= MAX_UNIVERSE:
                     break
             except Exception as e:
                 logger.debug(f"Failed to load universe from {path}: {e}")
@@ -543,7 +639,7 @@ class DGTMomentumBot:
             except Exception as e:
                 logger.debug(f"Whale flow check bypassed: {e}")
 
-            # ── 5. Shadow CVD & Taker Accumulation Audit (rebalancedbot integration) ──
+            # ── 5. CEX Taker Accumulation & CVD Shield (rebalancedbot integration) ──
             shadow_cvd_info = None
             shadow_cvd_badge = ""
             try:
@@ -556,24 +652,46 @@ class DGTMomentumBot:
                     s_m30 = shadow_cvd_info.get("mom_30d")
 
                     if s_status == "EXEMPT":
-                        shadow_cvd_badge = "\n🛡️ <b>[Shadow CVD]:</b> Exempt (Bybit Only / Unlisted on Binance)"
+                        shadow_cvd_badge = "\n🛡️ <b>[CVD Filter]:</b> Exempt (Bybit Only / Unlisted on Binance)"
                     else:
                         c7_s = f"{s_c7:+.2f}" if s_c7 is not None else "N/A"
                         c30_s = f"{s_c30:+.2f}" if s_c30 is not None else "N/A"
                         m30_s = f"{s_m30*100:+.1f}%" if s_m30 is not None else "N/A"
-                        if s_verdict == "ACCUMULATION":
-                            shadow_cvd_badge = f"\n🛡️ <b>[Shadow CVD]:</b> PASS ✅ Accumulation (7d: {c7_s}, 30d: {c30_s}, Mom: {m30_s})"
-                        elif s_verdict == "DISTRIBUTION":
-                            shadow_cvd_badge = f"\n⚠️ <b>[Shadow CVD]:</b> WOULD BE BLOCKED ❌ Net Dump (7d: {c7_s}, 30d: {c30_s}, Mom: {m30_s})"
-                        else:
-                            shadow_cvd_badge = f"\n⚪ <b>[Shadow CVD]:</b> PASS ⚪ Neutral (7d: {c7_s}, 30d: {c30_s}, Mom: {m30_s})"
-            except Exception as e:
-                logger.debug(f"Shadow CVD check bypassed: {e}")
 
-            # Capital & Sizing (Risk 1% of current balance)
+                        # ACTIVE HARD SHIELD: Block order if token is in heavy net distribution/dumping!
+                        if s_verdict == "DISTRIBUTION":
+                            self.funnel["blocked_cvd"] += 1
+                            logger.info(f"🚫 [CVD SHIELD] {symbol} blocked: Heavy distribution flow (7d: {c7_s}, 30d: {c30_s}, Mom: {m30_s}).")
+                            continue
+
+                        if s_verdict == "ACCUMULATION":
+                            shadow_cvd_badge = f"\n🛡️ <b>[CVD Shield]:</b> PASS ✅ Accumulation (7d: {c7_s}, 30d: {c30_s}, Mom: {m30_s})"
+                        else:
+                            shadow_cvd_badge = f"\n⚪ <b>[CVD Shield]:</b> PASS ⚪ Neutral (7d: {c7_s}, 30d: {c30_s}, Mom: {m30_s})"
+            except Exception as e:
+                logger.debug(f"CVD shield check bypassed: {e}")
+
+            # ── 6. Capital Sizing & Gross Exposure Controls ──
             risk_usd = self.balance * RISK_PCT
             pos_size = risk_usd / risk
             pos_notional = pos_size * entry_px
+
+            # Cap 1: Max notional per position (e.g. max 1.5x balance)
+            max_single_notional = self.balance * MAX_NOTIONAL_PER_POS_MULT
+            if pos_notional > max_single_notional:
+                pos_notional = max_single_notional
+                pos_size = pos_notional / entry_px
+                risk_usd = pos_size * risk  # strictly adjust nominal risk
+
+            # Cap 2: Total portfolio gross leverage cap (e.g. 3.0x balance)
+            cur_open_notional = sum(p.get("pos_notional", 0.0) for p in self.open_positions.values()) + \
+                                sum(o.get("pos_notional", 0.0) for o in self.pending_orders.values())
+            max_portfolio_notional = self.balance * MAX_PORTFOLIO_LEVERAGE
+
+            if cur_open_notional + pos_notional > max_portfolio_notional:
+                self.funnel["blocked_exposure"] += 1
+                logger.info(f"🚫 [EXPOSURE SHIELD] {symbol} blocked: Portfolio exposure would exceed {MAX_PORTFOLIO_LEVERAGE}x balance (${cur_open_notional + pos_notional:.2f} > ${max_portfolio_notional:.2f}).")
+                continue
 
             # Expiry: 6 bars (30 min) from close of setup bar i
             bar_i_open_ts = pd.to_datetime(df["open_time"].iloc[i], utc=True).timestamp()
@@ -596,6 +714,7 @@ class DGTMomentumBot:
                 "pos_size": pos_size,
                 "pos_notional": pos_notional,
                 "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_ts": now_ts,
                 "created_candle_time": str(df["open_time"].iloc[-1]),
                 "expires_at": expires_at,
                 "sentiment": sent_info,
@@ -631,50 +750,62 @@ class DGTMomentumBot:
         for symbol, order in list(self.pending_orders.items()):
             if len(self.open_positions) >= MAX_OPEN_POSITIONS:
                 break
-                
+
             df = nexus_data.fetch_recent(symbol, "5m", limit=5)
             if df.empty:
                 continue
 
-            # Strict Fill Check: HANYA evaluasi candle yang terjadi pada atau setelah order dibuat!
-            # Mencegah membaca low masa lalu (sebelum order dipasang)
+            # Strict Non-Lookahead Fill Check:
+            # 1. Bar yang buka SETELAH bar order dibuat (open_time > created_candle_time) valid menggunakan candle low.
+            # 2. Bar saat order dibuat (open_time == created_candle_time) HANYA valid jika harga live saat evaluasi ini <= entry_px!
             created_candle = order.get("created_candle_time")
+            is_filled = False
+            cur_close = float(df["close"].iloc[-1])
+            cur_high = float(df["high"].iloc[-1])
+
             if created_candle:
                 try:
                     df_open_times = pd.to_datetime(df["open_time"], utc=True)
                     target_time = pd.to_datetime(created_candle, utc=True)
-                    df_valid = df[df_open_times >= target_time]
-                    if df_valid.empty:
-                        df_valid = df.iloc[-1:]
+                    subsequent_bars = df[df_open_times > target_time]
+                    if not subsequent_bars.empty:
+                        cur_high = max(cur_high, float(subsequent_bars["high"].max()))
+                        if float(subsequent_bars["low"].min()) <= order["entry_px"]:
+                            is_filled = True
+                    # Jika masih di bar yang sama saat order dibuat, hanya fill jika harga live saat ini <= entry
+                    if not is_filled and cur_close <= order["entry_px"]:
+                        is_filled = True
                 except Exception:
-                    df_valid = df.iloc[-1:]
+                    if cur_close <= order["entry_px"]:
+                        is_filled = True
             else:
-                df_valid = df.iloc[-1:]
+                if cur_close <= order["entry_px"]:
+                    is_filled = True
 
-            cur_low = float(df_valid["low"].min())
-            cur_high = float(df_valid["high"].max())
-            cur_close = float(df["close"].iloc[-1])
-            
             # Check Fill: Price dipped to entry
-            if cur_low <= order["entry_px"]:
+            if is_filled:
+                self.funnel["orders_filled"] += 1
                 pos = dict(order)
                 pos["entry_time"] = datetime.now(timezone.utc).isoformat()
                 pos["cur_sl"] = order["sl_px"]
                 pos["stage"] = "HOLD" # HOLD -> TP1_HIT -> RUNNER
                 pos["rem_ratio"] = 1.0
-                pos["realized_pnl"] = 0.0
+                pos["gross_realized_pnl"] = 0.0
                 pos["hit_tp1"] = False
                 pos["hit_tp2"] = False
                 pos["filled_ts"] = now_ts
-                
-                # Deduct maker entry fee
-                fee = pos["pos_notional"] * MAKER_FEE
-                self.balance -= fee
-                pos["total_fees"] = fee
-                
+
+                # Deduct maker entry fee and track strictly in position
+                entry_fee = pos["pos_notional"] * MAKER_FEE
+                self.balance -= entry_fee
+                pos["entry_fee"] = entry_fee
+                pos["exit_fees"] = 0.0
+                pos["total_fees"] = entry_fee
+                pos["slippage_paid"] = 0.0
+
                 self.open_positions[symbol] = pos
                 del self.pending_orders[symbol]
-                
+
                 logger.info(f"🚀 [FILLED] {symbol} Long filled @ {fmt_px(order['entry_px'])}")
                 send_telegram(
                     f"🚀 <b>[DGT Momentum] Order Filled</b>\n"
@@ -685,11 +816,12 @@ class DGTMomentumBot:
                 )
                 self.save_state()
                 continue
-                
+
             # Check Runaway Invalidation:
             # Jika pada candle setelah order dibuat harga terus terbang menembus runaway ceiling tanpa pullback ke entry!
             runaway_threshold = float(order.get("runaway_px", order["entry_px"] + 3.5 * order["risk"]))
-            if cur_high >= runaway_threshold and cur_low > order["entry_px"]:
+            if cur_high >= runaway_threshold and cur_close > order["entry_px"]:
+                self.funnel["orders_runaway"] += 1
                 logger.info(f"🚫 [RUNAWAY CANCEL] {symbol} reached runaway level ({fmt_px(runaway_threshold)}) without pullback to entry. Order cancelled.")
                 send_telegram(
                     f"🚫 <b>[DGT Momentum] Setup Invalidation (Runaway)</b>\n"
@@ -705,6 +837,7 @@ class DGTMomentumBot:
 
             # Check Expiry (30 minutes / 6 bars)
             if now_ts >= order["expires_at"]:
+                self.funnel["orders_expired"] += 1
                 logger.info(f"⏳ [EXPIRED] Order for {symbol} expired without fill.")
                 send_telegram(
                     f"⏳ <b>[DGT Momentum] Setup Expired</b>\n"
@@ -745,63 +878,22 @@ class DGTMomentumBot:
 
             # ── A. Stop Loss / BEP / Trailing Stop Triggered ──
             if cur_low <= cur_sl:
-                close_px = cur_sl
-                rem_size = pos["pos_size"] * pos["rem_ratio"]
-                pnl_portion = rem_size * (close_px - entry)
-                fee = rem_size * close_px * TAKER_FEE
-                
-                net_trade_pnl = pos["realized_pnl"] + pnl_portion - fee
-                self.balance += (pnl_portion - fee)
-                
-                r_ret = net_trade_pnl / pos["risk_usd"]
-                status = "WIN" if net_trade_pnl > 0 else ("BE" if pos["hit_tp1"] else "LOSS")
-
                 if pos.get("stage") == "MOONBAG":
                     exit_reason = "MOONBAG_TRAILING"
-                    title = f"🏆 <b>[DGT Momentum] Moonbag Trailing Closed ({status})</b>"
                 elif pos.get("stage") == "RUNNER":
                     exit_reason = "RUNNER_TRAILING"
-                    title = f"💰 <b>[DGT Momentum] Runner Trailing Closed ({status})</b>"
                 else:
                     exit_reason = "SL_OR_BEP"
-                    title = f"🛑 <b>[DGT Momentum] Position Closed ({status})</b>"
-                
-                cvd_exit_badge = format_shadow_cvd_badge(pos)
-                logger.info(f"🛑 [CLOSED] {symbol} hit {exit_reason} @ {fmt_px(close_px)} | PnL: ${net_trade_pnl:.2f} ({r_ret:+.2f}R)")
-                send_telegram(
-                    f"{title}\n"
-                    f"<b>Pair:</b> #{symbol}\n"
-                    f"<b>Exit Price:</b> {fmt_px(close_px)}\n"
-                    f"<b>Net PnL:</b> ${net_trade_pnl:+.2f} ({r_ret:+.2f}R)\n"
-                    f"<b>Account Balance:</b> ${self.balance:.2f}"
-                    f"{cvd_exit_badge}"
-                )
-                
-                pos["exit_px"] = close_px
-                pos["exit_time"] = datetime.now(timezone.utc).isoformat()
-                pos["net_pnl"] = net_trade_pnl
-                pos["net_r"] = r_ret
-                pos["status"] = status
-                pos["exit_reason"] = exit_reason
-                self.log_closed_trade(pos)
-                del self.open_positions[symbol]
-                self.save_state()
+                self._close_position(pos, close_px=cur_sl, exit_reason=exit_reason, is_maker=False)
                 continue
 
             # ── B. TP1 Trigger (+1.0R): Close 33%, move SL to Breakeven ──
             if not pos["hit_tp1"] and cur_high >= pos["tp1_px"]:
                 pos["hit_tp1"] = True
-                close_ratio = 0.33
                 close_px = pos["tp1_px"]
-                closed_size = pos["pos_size"] * close_ratio
-                pnl_portion = closed_size * (close_px - entry)
-                fee = closed_size * close_px * MAKER_FEE
-                
-                pos["realized_pnl"] += (pnl_portion - fee)
-                self.balance += (pnl_portion - fee)
-                pos["rem_ratio"] -= close_ratio
+                self._partial_close(pos, close_ratio=0.33, close_px=close_px, is_maker=True)
                 pos["cur_sl"] = entry # MOVE SL TO BREAKEVEN!
-                
+
                 logger.info(f"💰 [TP1 HIT] {symbol} reached +1.0R! 33% closed, SL moved to BEP {fmt_px(entry)}")
                 send_telegram(
                     f"💰 <b>[DGT Momentum] TP1 Hit (+1.0R)</b>\n"
@@ -815,10 +907,10 @@ class DGTMomentumBot:
             # ── C. TP2 Trigger (+2.5R): Dynamic Decision ──
             if pos["hit_tp1"] and not pos["hit_tp2"] and cur_high >= pos["tp2_px"]:
                 pos["hit_tp2"] = True
-                
+
                 # Check Dynamic Trailing Condition:
                 strong_momentum = (ema9[-1] > ema21[-1]) and (cur_close > ema9[-1]) and not dgt_red_light
-                
+
                 if strong_momentum:
                     # Enters RUNNER mode: lock SL at +2.0R, target +3.5R
                     pos["stage"] = "RUNNER"
@@ -833,103 +925,20 @@ class DGTMomentumBot:
                         f"<b>Trailing Target:</b> {fmt_px(pos['tp3_px'])} (+3.5R)"
                     )
                 else:
-                    # Full close remaining 67% at +2.5R
-                    close_px = pos["tp2_px"]
-                    rem_size = pos["pos_size"] * pos["rem_ratio"]
-                    pnl_portion = rem_size * (close_px - entry)
-                    fee = rem_size * close_px * MAKER_FEE
-                    net_trade_pnl = pos["realized_pnl"] + pnl_portion - fee
-                    
-                    self.balance += (pnl_portion - fee)
-                    r_ret = net_trade_pnl / pos["risk_usd"]
-                    
-                    cvd_exit_badge = format_shadow_cvd_badge(pos)
-                    logger.info(f"🏆 [FULL TP2] {symbol} closed remaining at +2.5R | Total PnL: ${net_trade_pnl:.2f} ({r_ret:+.2f}R)")
-                    send_telegram(
-                        f"🏆 <b>[DGT Momentum] Full TP2 Target Hit!</b>\n"
-                        f"<b>Pair:</b> #{symbol}\n"
-                        f"<b>Exit Price:</b> {fmt_px(close_px)} (+2.5R)\n"
-                        f"<b>Net PnL:</b> ${net_trade_pnl:+.2f} ({r_ret:+.2f}R)\n"
-                        f"<b>Balance:</b> ${self.balance:.2f}"
-                        f"{cvd_exit_badge}"
-                    )
-                    
-                    pos["exit_px"] = close_px
-                    pos["exit_time"] = datetime.now(timezone.utc).isoformat()
-                    pos["net_pnl"] = net_trade_pnl
-                    pos["net_r"] = r_ret
-                    pos["status"] = "WIN"
-                    pos["exit_reason"] = "FULL_TP2"
-                    self.log_closed_trade(pos)
-                    del self.open_positions[symbol]
-                    self.save_state()
+                    self._close_position(pos, close_px=pos["tp2_px"], exit_reason="FULL_TP2", is_maker=True)
                     continue
 
             # ── D. RUNNER & MOONBAG Phase: Dynamic Step Trailing, Swing Low & Whale Protection ──
             if pos.get("stage") in ("RUNNER", "MOONBAG"):
                 # Emergency DGT Red Light Exit (Exhaustion volume spike)
                 if dgt_red_light:
-                    close_px = cur_close
-                    rem_size = pos["pos_size"] * pos["rem_ratio"]
-                    pnl_portion = rem_size * (close_px - entry)
-                    fee = rem_size * close_px * TAKER_FEE
-                    net_trade_pnl = pos["realized_pnl"] + pnl_portion - fee
-                    self.balance += (pnl_portion - fee)
-                    r_ret = net_trade_pnl / pos["risk_usd"]
-                    
-                    cvd_exit_badge = format_shadow_cvd_badge(pos)
-                    logger.info(f"🚦 [RED LIGHT EMERGENCY EXIT] {symbol} volume spike! Climax exit @ {fmt_px(close_px)} | PnL: ${net_trade_pnl:.2f}")
-                    send_telegram(
-                        f"🚦 <b>[DGT Momentum] DGT Red Light Exhaustion!</b>\n"
-                        f"<b>Pair:</b> #{symbol}\n"
-                        f"<b>Warning:</b> Extreme volume spike detected. Emergency exit at top!\n"
-                        f"<b>Exit Price:</b> {fmt_px(close_px)}\n"
-                        f"<b>Total PnL:</b> ${net_trade_pnl:+.2f} ({r_ret:+.2f}R)"
-                        f"{cvd_exit_badge}"
-                    )
-                    pos["exit_px"] = close_px
-                    pos["exit_time"] = datetime.now(timezone.utc).isoformat()
-                    pos["net_pnl"] = net_trade_pnl
-                    pos["net_r"] = r_ret
-                    pos["status"] = "WIN"
-                    pos["exit_reason"] = "DGT_RED_LIGHT"
-                    self.log_closed_trade(pos)
-                    del self.open_positions[symbol]
-                    self.save_state()
+                    self._close_position(pos, close_px=cur_close, exit_reason="DGT_RED_LIGHT", is_maker=False)
                     continue
 
                 # Emergency Whale Climax Dump Exit: jika terdeteksi Mega/Ultra Sell >= $2M dalam 5 menit terakhir
                 whale_dump = get_symbol_whale_flow(symbol, max_age_minutes=5)
                 if whale_dump and whale_dump.get("bias") == "BEARISH" and float(whale_dump.get("value_usd", 0.0)) >= 2_000_000:
-                    close_px = cur_close
-                    rem_size = pos["pos_size"] * pos["rem_ratio"]
-                    pnl_portion = rem_size * (close_px - entry)
-                    fee = rem_size * close_px * TAKER_FEE
-                    net_trade_pnl = pos["realized_pnl"] + pnl_portion - fee
-                    self.balance += (pnl_portion - fee)
-                    r_ret = net_trade_pnl / pos["risk_usd"]
-
-                    w_val = float(whale_dump.get("value_usd", 0.0))
-                    cvd_exit_badge = format_shadow_cvd_badge(pos)
-                    logger.info(f"🐋🛑 [WHALE CLIMAX EXIT] {symbol} hit by Ultra-Mega Sell (${w_val:,.0f})! Profit locked @ {fmt_px(close_px)} | PnL: ${net_trade_pnl:.2f}")
-                    send_telegram(
-                        f"🐋🛑 <b>[DGT Momentum] Whale Climax Exit!</b>\n"
-                        f"<b>Pair:</b> #{symbol}\n"
-                        f"<b>Alert:</b> Ultra-Mega Market Sell Paus (${w_val/1e6:.2f}M) terdeteksi di Binance Futures!\n"
-                        f"<b>Action:</b> Posisi Runner langsung diamankan di pucuk.\n"
-                        f"<b>Exit Price:</b> {fmt_px(close_px)}\n"
-                        f"<b>Total PnL:</b> ${net_trade_pnl:+.2f} ({r_ret:+.2f}R)"
-                        f"{cvd_exit_badge}"
-                    )
-                    pos["exit_px"] = close_px
-                    pos["exit_time"] = datetime.now(timezone.utc).isoformat()
-                    pos["net_pnl"] = net_trade_pnl
-                    pos["net_r"] = r_ret
-                    pos["status"] = "WIN"
-                    pos["exit_reason"] = "WHALE_CLIMAX_EXIT"
-                    self.log_closed_trade(pos)
-                    del self.open_positions[symbol]
-                    self.save_state()
+                    self._close_position(pos, close_px=cur_close, exit_reason="WHALE_CLIMAX_EXIT", is_maker=False)
                     continue
 
                 # 3. Dynamic Step Trailing Floors (Based on Empirical Pullback Depth)
@@ -952,20 +961,12 @@ class DGTMomentumBot:
                 # 4. Trigger TP3 (+3.5R): Close 34%, Lock SL at +2.5R, Unlock Unlimited Moonbag!
                 if pos.get("stage") == "RUNNER" and cur_high >= pos.get("tp3_px", entry + 3.5 * risk):
                     pos["stage"] = "MOONBAG"
-                    close_ratio = 0.34  # Close half of remaining 67%, leaving ~33% Moonbag
                     close_px = pos.get("tp3_px", entry + 3.5 * risk)
-                    closed_size = pos["pos_size"] * close_ratio
-                    pnl_portion = closed_size * (close_px - entry)
-                    fee = closed_size * close_px * MAKER_FEE
+                    self._partial_close(pos, close_ratio=0.34, close_px=close_px, is_maker=True)
 
-                    pos["realized_pnl"] += (pnl_portion - fee)
-                    self.balance += (pnl_portion - fee)
-                    pos["rem_ratio"] -= close_ratio
-                    
                     # Lock SL strictly at +2.5R guaranteed floor!
                     pos["cur_sl"] = max(pos["cur_sl"], float(entry + 2.5 * risk))
-                    
-                    r_ret = pos["realized_pnl"] / pos["risk_usd"]
+
                     logger.info(f"🚀 [TP3 HIT & MOONBAG] {symbol} reached +3.5R! 34% closed, SL locked at +2.5R ({fmt_px(pos['cur_sl'])}). 33% Moonbag trailing freely!")
                     send_telegram(
                         f"🚀 <b>[DGT Momentum] TP3 Reached (+3.5R) & Moonbag Unlocked!</b>\n"
@@ -979,52 +980,37 @@ class DGTMomentumBot:
 
             # ── E. Max Hold Expiry (6 hours) ──
             if now_ts - pos.get("filled_ts", now_ts) > 6 * 3600:
-                close_px = cur_close
-                rem_size = pos["pos_size"] * pos["rem_ratio"]
-                pnl_portion = rem_size * (close_px - entry)
-                fee = rem_size * close_px * TAKER_FEE
-                net_trade_pnl = pos["realized_pnl"] + pnl_portion - fee
-                self.balance += (pnl_portion - fee)
-                r_ret = net_trade_pnl / pos["risk_usd"]
-                
-                cvd_exit_badge = format_shadow_cvd_badge(pos)
-                logger.info(f"⏰ [TIMEOUT EXIT] {symbol} hit max hold 6h | PnL: ${net_trade_pnl:.2f} ({r_ret:+.2f}R)")
-                send_telegram(
-                    f"⏰ <b>[DGT Momentum] Max Hold Timeout (6h)</b>\n"
-                    f"<b>Pair:</b> #{symbol}\n"
-                    f"<b>Exit Price:</b> {fmt_px(close_px)}\n"
-                    f"<b>Total PnL:</b> ${net_trade_pnl:+.2f} ({r_ret:+.2f}R)\n"
-                    f"<b>Balance:</b> ${self.balance:.2f}"
-                    f"{cvd_exit_badge}"
-                )
-                pos["exit_px"] = close_px
-                pos["exit_time"] = datetime.now(timezone.utc).isoformat()
-                pos["net_pnl"] = net_trade_pnl
-                pos["net_r"] = r_ret
-                pos["status"] = "TIME_CLOSE"
-                pos["exit_reason"] = "MAX_HOLD_TIMEOUT"
-                self.log_closed_trade(pos)
-                del self.open_positions[symbol]
-                self.save_state()
+                self._close_position(pos, close_px=cur_close, exit_reason="MAX_HOLD_TIMEOUT", is_maker=False)
                 continue
 
     def run_cycle(self) -> None:
         """One scan cycle across the universe."""
         symbols = self.get_universe()
         logger.info(f"Scanning {len(symbols)} pairs across Nexus universe...")
-        
+
+        self.cycle_count = getattr(self, "cycle_count", 0) + 1
+        self.funnel["scanned"] += len(symbols)
+
         # 1. Update existing orders and positions first
         self.update_orders_and_positions()
-        
+
         # 2. Scan pairs for new DGT Golden Trio setups
         for sym in symbols:
             try:
                 self.evaluate_symbol(sym)
             except Exception as e:
                 logger.debug(f"Error evaluating {sym}: {e}")
-                
+
         self.save_state()
         logger.info(f"Cycle completed. Balance: ${self.balance:.2f} | Open: {len(self.open_positions)} | Orders: {len(self.pending_orders)} | Closed: {len(self.closed_trades)}")
+
+        # Funnel Telemetry every 10 cycles
+        if self.cycle_count % 10 == 0:
+            logger.info(
+                f"📊 [FUNNEL METRICS] Scanned: {self.funnel['scanned']} | Trio: {self.funnel['pass_trio']} | "
+                f"Blocked: [Sent:{self.funnel['blocked_sentiment']}, Whale:{self.funnel['blocked_whale']}, CVD:{self.funnel['blocked_cvd']}, Expo:{self.funnel['blocked_exposure']}] | "
+                f"Orders: [Created:{self.funnel['orders_created']}, Filled:{self.funnel['orders_filled']}, Runaway:{self.funnel['orders_runaway']}, Expired:{self.funnel['orders_expired']}]"
+            )
 
     def start(self) -> None:
         logger.info("=== Starting DGT Momentum Paper Trading Bot (M5) ===")
